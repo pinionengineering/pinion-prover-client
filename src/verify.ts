@@ -74,6 +74,14 @@ export interface VerifyParams {
  * it holds the data.
  */
 export function verifyProof(params: VerifyParams): boolean {
+  try {
+    return _verifyProof(params);
+  } catch {
+    return false;
+  }
+}
+
+function _verifyProof(params: VerifyParams): boolean {
   const { clientSetup, blockIds, challenge, proofBytes } = params;
 
   // 1. Decode the challenge to recover the seed used for derivation.

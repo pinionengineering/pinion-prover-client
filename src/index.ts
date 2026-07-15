@@ -5,7 +5,7 @@ export {
   PinNotActiveError,
   parseSetupResponse,
 } from './client.js';
-export type { PinionProverClientOptions } from './client.js';
+export type { PinionProverClientOptions, AuditOptions } from './client.js';
 
 // Verification
 export { verifyProof, parseClientSetup } from './verify.js';
@@ -16,6 +16,7 @@ export {
   buildChallenge,
   deriveIndicesAndCoeffs,
   blockHashG1,
+  superBlockId,
   base64ToBytes,
   uint8ToBase64,
   BN254_ORDER,
@@ -40,12 +41,14 @@ export type {
   WireClientSetup,
   WireChallenge,
   WireProof,
+  ProveResponse,
   RawTaggedRoot,
   RawSetupResponse,
   ParsedRoot,
   ParsedSetup,
   ChallengeKeyInfo,
   CreateKeyResponse,
+  CreateKeyResult,
   TagResponse,
   AuditResult,
 } from './types.js';

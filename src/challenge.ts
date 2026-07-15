@@ -1,10 +1,11 @@
 /**
  * Challenge construction and deterministic derivation.
  *
- * Ports two Go functions exactly:
+ * Ports three Go functions exactly:
  *
  *   DeriveChallenge()   storage-proofs/line/chalderive.go
  *   blockHashG1()       storage-proofs/por/sw/pub.go
+ *   SuperBlockID()      ipfs-storage-proofs/superblock.go
  *
  * Any deviation from these implementations will produce challenges or
  * verification paths that disagree with the server.
@@ -12,10 +13,10 @@
 
 import { hmac } from '@noble/hashes/hmac';
 import { sha256 } from '@noble/hashes/sha256';
-import { G1_BASE, bytesToBigInt, g1ScalarMult, type G1Point } from './bn254.js';
+import { bytesToBigInt, hashToG1, type G1Point } from './bn254.js';
 
 /**
- * BN254 subgroup order q (same as bn256.Order in Go).
+ * BN254 (alt_bn128 / Ethereum) subgroup order q.
  * = 21888242871839275222246405745257275088548364400416034343698204186575808495617
  */
 export const BN254_ORDER =
@@ -110,21 +111,50 @@ export function deriveIndicesAndCoeffs(
 }
 
 // ---------------------------------------------------------------------------
-// ROM hash-to-G1
+// Super-block id construction (chunked protocols: SW-Priv, SW-Pub)
 // ---------------------------------------------------------------------------
 
 /**
- * H(λ‖id) = SHA-256(λ‖id) mod q · G₁
+ * Build a challenge id for one super-block of a chunked protocol's root.
+ *
+ * Exact port of SuperBlockID() in ipfs-storage-proofs/superblock.go:
+ *   id = rootCID.Bytes() || BigEndian(localIndex as uint64, 8 bytes)
+ *
+ * Only the root's own CID bytes are used — never a content-block CID or byte
+ * offset — because the server maps (rootCID, localIndex) back to real bytes
+ * purely through its own local manifest, never over the wire. Both sides only
+ * need to agree on `rootBytes` (the client already knows the root it's
+ * auditing) and `localIndex` (chosen independently from block_count), so no
+ * per-block manifest is required for chunked protocols at all.
+ *
+ * @param rootBytes  CID.parse(root).bytes for the root being audited.
+ * @param localIndex Index in [0, block_count) — must fit in a uint64 (Number
+ *                    is safe here since block counts never approach 2^53).
+ */
+export function superBlockId(rootBytes: Uint8Array, localIndex: number): Uint8Array {
+  const id = new Uint8Array(rootBytes.length + 8);
+  id.set(rootBytes);
+  const view = new DataView(id.buffer, id.byteOffset + rootBytes.length, 8);
+  view.setBigUint64(0, BigInt(localIndex), false); // false = big-endian
+  return id;
+}
+
+// ---------------------------------------------------------------------------
+// Hash-to-G1
+// ---------------------------------------------------------------------------
+
+/**
+ * H(λ‖id) = HashToG1(λ‖id) using RFC 9380 SVDW.
  *
  * Exact port of blockHashG1() in storage-proofs/por/sw/pub.go.
  * λ is the 16-byte file name from WireClientSetup.name; id is CID.Bytes().
+ * Uses DST "sw-pub-v1-BN254G1_XMD:SHA-256_SVDW_RO_" internally.
  */
 export function blockHashG1(name: Uint8Array, id: Uint8Array): G1Point {
   const buf = new Uint8Array(name.length + id.length);
   buf.set(name);
   buf.set(id, name.length);
-  const scalar = bytesToBigInt(sha256(buf)) % BN254_ORDER;
-  return g1ScalarMult(G1_BASE, scalar);
+  return hashToG1(buf);
 }
 
 // ---------------------------------------------------------------------------
