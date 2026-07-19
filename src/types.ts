@@ -14,7 +14,6 @@ export interface WireClientSetup {
   protocol: string; // "swpub"
   suite_id: number; // 1 = SuiteV1 (HMAC-SHA256)
   s: number;        // sectors per block (determines μ vector length)
-  l: number;        // challenge size (blocks per round) set at key creation
   name: string;     // base64 of 16-byte random file-name λ bound into every tag
   v: string;        // base64 of 128-byte G2 point V = α·G₂ (public key)
   u: string[];      // base64 of 64-byte G1 points u₁…uₛ (s elements)
@@ -97,8 +96,6 @@ export interface ParsedSetup {
   roots: ParsedRoot[];
   /** Sum of block counts across all roots. */
   totalBlocks: number;
-  /** The l field from clientSetup: recommended blocks per challenge round. */
-  challengeSize: number;
 }
 
 export interface ChallengeKeyInfo {
@@ -142,6 +139,34 @@ export interface CreateKeyResult {
 export interface TagResponse {
   block_ids?: string[]; // CID strings in TagList order — non-chunked protocols only
   block_count?: number; // super-block count — chunked protocols only
+}
+
+/** Returned by POST /api/v1/tag: the tag job has been created and queued. */
+export interface TagJobResponse {
+  job_id: string;
+}
+
+/** How much of an in-flight tag job has completed. */
+export interface TagJobProgress {
+  total_blocks: number;
+  completed_blocks: number;
+}
+
+/**
+ * Raw status response from GET /api/v1/tag/:job_id.
+ *
+ * `status` is one of the tagstate.Lifecycle string values from pinion-prover:
+ * "tag-queued" | "tag-planning" | "tag-running" | "tag-merging" | "tag-done" |
+ * "tag-failed". `block_ids`/`block_count` are populated only once `status` is
+ * "tag-done" — the same fields TagResponse used to return synchronously.
+ * `error` is populated only once `status` is "tag-failed".
+ */
+export interface TagJobStatusResponse {
+  status: string;
+  progress?: TagJobProgress;
+  block_ids?: string[];
+  block_count?: number;
+  error?: string;
 }
 
 /** Result of a complete audit round (challenge → prove → cryptographic verify). */

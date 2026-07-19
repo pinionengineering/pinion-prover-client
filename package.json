@@ -1,6 +1,6 @@
 {
   "name": "@pinionengineering/prover-client",
-  "version": "0.3.0",
+  "version": "0.5.0",
   "description": "JavaScript/TypeScript client for the pinion-prover storage-proof service. Builds SW-Pub challenges and cryptographically verifies proofs using BN254 pairings.",
   "type": "module",
   "main": "./dist/index.js",

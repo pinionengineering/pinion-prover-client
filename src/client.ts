@@ -18,6 +18,9 @@ import type {
   ParsedRoot,
   ProveResponse,
   RawSetupResponse,
+  TagJobProgress,
+  TagJobResponse,
+  TagJobStatusResponse,
   TagResponse,
   WireClientSetup,
 } from './types.js';
@@ -53,6 +56,16 @@ export interface AuditOptions {
    * For an exact block count use buildChallenge(n, total) + prove() + verifyProof().
    */
   challengePct?: number;
+}
+
+/** Options for tag()'s internal job-status polling. */
+export interface TagOptions {
+  /** Milliseconds between GET /tag/:job_id polls. Default 1000. */
+  pollIntervalMs?: number;
+  /** Give up and throw TagTimeoutError after this long. Default 10 minutes. */
+  timeoutMs?: number;
+  /** Called after every status poll with the latest progress, if present. */
+  onProgress?: (progress: TagJobProgress) => void;
 }
 
 export class PinionProverClient {
@@ -119,11 +132,47 @@ export class PinionProverClient {
    * authentication tags, and store them under keyId.
    *
    * The root must already be in the "pinned" lifecycle state for the
-   * authenticated account.  Call getSetup() after tagging to get the updated
-   * block ID lists for the next audit cycle.
+   * authenticated account.  Tagging runs asynchronously on the server —
+   * this enqueues the job and polls GET /api/v1/tag/:job_id until it
+   * reaches a terminal state, so the returned promise resolves only once
+   * tagging is actually done (matching the pre-async blocking behavior).
+   * Call getSetup() after tagging to get the updated block ID lists for the
+   * next audit cycle.
+   *
+   * Throws TagFailedError if the job reaches "tag-failed", or
+   * TagTimeoutError if it doesn't reach a terminal state within
+   * options.timeoutMs.
    */
-  async tag(root: string, keyId: string): Promise<TagResponse> {
-    return this.post<TagResponse>('/api/v1/tag', { root, key_id: keyId });
+  async tag(root: string, keyId: string, options: TagOptions = {}): Promise<TagResponse> {
+    const pollIntervalMs = options.pollIntervalMs ?? 1000;
+    const timeoutMs = options.timeoutMs ?? 10 * 60 * 1000;
+
+    const { job_id: jobId } = await this.post<TagJobResponse>('/api/v1/tag', {
+      root,
+      key_id: keyId,
+    });
+
+    const deadline = Date.now() + timeoutMs;
+    for (;;) {
+      const status = await this.tagStatus(jobId);
+      if (status.progress) options.onProgress?.(status.progress);
+
+      if (status.status === 'tag-done') {
+        return { block_ids: status.block_ids, block_count: status.block_count };
+      }
+      if (status.status === 'tag-failed') {
+        throw new TagFailedError(jobId, status.error ?? 'unknown error');
+      }
+      if (Date.now() >= deadline) {
+        throw new TagTimeoutError(jobId, status.status);
+      }
+      await new Promise((resolve) => setTimeout(resolve, pollIntervalMs));
+    }
+  }
+
+  /** Poll the status of a tag job started by tag(). Exposed for callers that want progress UI without waiting on tag()'s full promise. */
+  async tagStatus(jobId: string): Promise<TagJobStatusResponse> {
+    return this.get<TagJobStatusResponse>(`/api/v1/tag/${encodeURIComponent(jobId)}`);
   }
 
   async deregister(keyId: string, root: string): Promise<void> {
@@ -283,6 +332,28 @@ export class PinNotActiveError extends Error {
   }
 }
 
+/** Thrown by tag() when the async tag job reaches the "tag-failed" state. */
+export class TagFailedError extends Error {
+  constructor(
+    public readonly jobId: string,
+    public readonly reason: string,
+  ) {
+    super(`tag job ${jobId} failed: ${reason}`);
+    this.name = 'TagFailedError';
+  }
+}
+
+/** Thrown by tag() when the job hasn't reached a terminal state within the configured timeout. */
+export class TagTimeoutError extends Error {
+  constructor(
+    public readonly jobId: string,
+    public readonly lastStatus: string,
+  ) {
+    super(`tag job ${jobId} timed out (last status: ${lastStatus})`);
+    this.name = 'TagTimeoutError';
+  }
+}
+
 // ---------------------------------------------------------------------------
 // Setup parsing (exported for use without the full client)
 // ---------------------------------------------------------------------------
@@ -317,5 +388,5 @@ export function parseSetupResponse(raw: RawSetupResponse): ParsedSetup {
 
   const totalBlocks = roots.reduce((s, r) => s + r.blockIds.length, 0);
 
-  return { clientSetup, roots, totalBlocks, challengeSize: clientSetup.l };
+  return { clientSetup, roots, totalBlocks };
 }

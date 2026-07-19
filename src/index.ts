@@ -3,9 +3,11 @@ export {
   PinionProverClient,
   ProverError,
   PinNotActiveError,
+  TagFailedError,
+  TagTimeoutError,
   parseSetupResponse,
 } from './client.js';
-export type { PinionProverClientOptions, AuditOptions } from './client.js';
+export type { PinionProverClientOptions, AuditOptions, TagOptions } from './client.js';
 
 // Verification
 export { verifyProof, parseClientSetup } from './verify.js';
@@ -50,5 +52,8 @@ export type {
   CreateKeyResponse,
   CreateKeyResult,
   TagResponse,
+  TagJobResponse,
+  TagJobProgress,
+  TagJobStatusResponse,
   AuditResult,
 } from './types.js';
