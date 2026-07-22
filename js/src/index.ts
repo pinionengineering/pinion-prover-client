@@ -2,20 +2,24 @@
 export {
   PinionProverClient,
   ProverError,
+  MalformedResponseError,
   PinNotActiveError,
   TagFailedError,
   TagTimeoutError,
+  ProveFailedError,
+  ProveTimeoutError,
   parseSetupResponse,
 } from './client.js';
-export type { PinionProverClientOptions, AuditOptions, TagOptions } from './client.js';
+export type { PinionProverClientOptions, AuditOptions, TagOptions, ProveOptions } from './client.js';
 
 // Verification
-export { verifyProof, parseClientSetup } from './verify.js';
+export { verifyProof, verifyProofResult, parseClientSetup } from './verify.js';
 export type { VerifyParams } from './verify.js';
 
 // Challenge construction
 export {
   buildChallenge,
+  decodeChallenge,
   deriveIndicesAndCoeffs,
   blockHashG1,
   superBlockId,
@@ -44,6 +48,8 @@ export type {
   WireChallenge,
   WireProof,
   ProveResponse,
+  ProveJobResponse,
+  ProveJobStatusResponse,
   RawTaggedRoot,
   RawSetupResponse,
   ParsedRoot,
@@ -51,9 +57,13 @@ export type {
   ChallengeKeyInfo,
   CreateKeyResponse,
   CreateKeyResult,
+  UpdateKeyLabelRequest,
   TagResponse,
   TagJobResponse,
   TagJobProgress,
   TagJobStatusResponse,
+  TagJobListEntry,
+  TagJobListResponse,
+  ProofVerificationResult,
   AuditResult,
 } from './types.js';

@@ -1,6 +1,6 @@
 {
   "name": "@pinionengineering/prover-client",
-  "version": "0.5.0",
+  "version": "0.10.0",
   "description": "JavaScript/TypeScript client for the pinion-prover storage-proof service. Builds SW-Pub challenges and cryptographically verifies proofs using BN254 pairings.",
   "type": "module",
   "main": "./dist/index.js",
@@ -21,7 +21,7 @@
     "build:watch": "tsc --watch",
     "typecheck": "tsc --noEmit",
     "test": "npm run build && node test/verify.test.mjs",
-    "test:gen": "cd testdata/gen && go run . > ../vectors.json"
+    "test:gen": "cd ../testdata/gen && go run . > ../vectors.json"
   },
   "dependencies": {
     "@noble/curves": "^1.4.0",

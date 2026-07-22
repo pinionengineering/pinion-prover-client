@@ -37,7 +37,7 @@ import {
   type G1Point,
 } from './bn254.js';
 import { base64ToBytes, blockHashG1, deriveIndicesAndCoeffs } from './challenge.js';
-import type { WireClientSetup, WireChallenge, WireProof } from './types.js';
+import type { WireClientSetup, WireChallenge, WireProof, ProofVerificationResult } from './types.js';
 
 export interface VerifyParams {
   /**
@@ -64,21 +64,41 @@ export interface VerifyParams {
 }
 
 /**
+ * Cryptographically verify a storage proof returned by pinion-prover,
+ * distinguishing a real pairing-equation failure from one that couldn't be
+ * evaluated at all (malformed/truncated response, wrong shape, etc.) —
+ * see ProofVerificationResult's doc comment for why that distinction
+ * matters. This is what the website's StorageHealthContext should call
+ * instead of checking resp.ok alone — HTTP 200 only proves the server
+ * responded, not that it holds the data, and even a successful response
+ * doesn't guarantee proofBytes is well-formed enough to evaluate.
+ */
+export function verifyProofResult(params: VerifyParams): ProofVerificationResult {
+  let result: boolean;
+  try {
+    result = _verifyProof(params);
+  } catch (cause) {
+    return { verified: false, reason: 'malformed-input', cause };
+  }
+  return result ? { verified: true } : { verified: false, reason: 'pairing-mismatch' };
+}
+
+/**
  * Cryptographically verify a storage proof returned by pinion-prover.
  *
  * Returns true if and only if the pairing equation holds.  A false result means
- * the server either does not hold the data or returned a malformed proof.
+ * the server either does not hold the data, returned a deliberately bad proof,
+ * OR the response couldn't even be parsed as a proof at all — those last two
+ * cases are indistinguishable through this function.
  *
- * This is what the website's StorageHealthContext should call instead of
- * checking resp.ok alone — HTTP 200 only proves the server responded, not that
- * it holds the data.
+ * @deprecated Use verifyProofResult() instead — it distinguishes a genuine
+ * cryptographic failure ({ reason: 'pairing-mismatch' }) from a
+ * malformed/unevaluable response ({ reason: 'malformed-input' }, e.g. an
+ * infra error masquerading as a proof). Reporting the latter to a user as
+ * "proof failed" implies data loss that may not have happened at all.
  */
 export function verifyProof(params: VerifyParams): boolean {
-  try {
-    return _verifyProof(params);
-  } catch {
-    return false;
-  }
+  return verifyProofResult(params).verified;
 }
 
 function _verifyProof(params: VerifyParams): boolean {

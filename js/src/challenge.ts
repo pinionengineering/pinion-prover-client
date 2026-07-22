@@ -14,6 +14,7 @@
 import { hmac } from '@noble/hashes/hmac';
 import { sha256 } from '@noble/hashes/sha256';
 import { bytesToBigInt, hashToG1, type G1Point } from './bn254.js';
+import type { WireChallenge } from './types.js';
 
 /**
  * BN254 (alt_bn128 / Ethereum) subgroup order q.
@@ -64,6 +65,17 @@ export function buildChallenge(challengeSize: number, totalBlocks: number): stri
     n: totalBlocks,
   };
   return uint8ToBase64(new TextEncoder().encode(JSON.stringify(wireChal)));
+}
+
+/**
+ * Decode a base64(JSON(WireChallenge)) string — the same shape buildChallenge()
+ * produces — back into a WireChallenge, for displaying/reporting a challenge
+ * already built (AuditResult.challenge, or a caught ProveFailedError/
+ * ProveTimeoutError's .challenge), not for building a new one.
+ */
+export function decodeChallenge(challengeBase64: string): WireChallenge {
+  const bytes = base64ToBytes(challengeBase64);
+  return JSON.parse(new TextDecoder().decode(bytes)) as WireChallenge;
 }
 
 // ---------------------------------------------------------------------------

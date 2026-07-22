@@ -16,8 +16,11 @@ import type {
   CreateKeyResult,
   ParsedSetup,
   ParsedRoot,
-  ProveResponse,
+  ProveJobResponse,
+  ProveJobStatusResponse,
   RawSetupResponse,
+  TagJobListEntry,
+  TagJobListResponse,
   TagJobProgress,
   TagJobResponse,
   TagJobStatusResponse,
@@ -25,7 +28,7 @@ import type {
   WireClientSetup,
 } from './types.js';
 import { buildChallenge, base64ToBytes, superBlockId } from './challenge.js';
-import { verifyProof, parseClientSetup } from './verify.js';
+import { verifyProofResult, parseClientSetup } from './verify.js';
 import { CID } from 'multiformats/cid';
 
 export interface PinionProverClientOptions {
@@ -64,8 +67,29 @@ export interface TagOptions {
   pollIntervalMs?: number;
   /** Give up and throw TagTimeoutError after this long. Default 10 minutes. */
   timeoutMs?: number;
-  /** Called after every status poll with the latest progress, if present. */
-  onProgress?: (progress: TagJobProgress) => void;
+  /**
+   * Called after every status poll with the latest progress and the raw
+   * status string ("tag-queued" | "tag-planning" | "tag-running" |
+   * "tag-merging" | "tag-done" | "tag-failed"). The server populates
+   * progress on every poll regardless of status, including "tag-queued"
+   * before any work has started (as {total_blocks: 0, completed_blocks: 0})
+   * — check `status` if you need to distinguish "not started yet" from
+   * "actively running".
+   */
+  onProgress?: (progress: TagJobProgress, status: string) => void;
+}
+
+/** Options for prove()'s internal job-status polling. */
+export interface ProveOptions {
+  /** Milliseconds between GET /prove/:job_id polls. Default 500. */
+  pollIntervalMs?: number;
+  /**
+   * Give up and throw ProveTimeoutError after this long. Default 60
+   * seconds — much shorter than tag()'s default, since a proof round is one
+   * bounded crypto operation over the sampled blocks, not a per-block loop
+   * over an entire file.
+   */
+  timeoutMs?: number;
 }
 
 export class PinionProverClient {
@@ -93,18 +117,25 @@ export class PinionProverClient {
    * Store these alongside `keyId` — they are all you need to verify proofs locally,
    * independent of the server returning the same material later.
    */
-  async createKey(): Promise<CreateKeyResult> {
+  async createKey(label?: string): Promise<CreateKeyResult> {
     const raw = await this.post<CreateKeyResponse>('/api/v1/challenge-key', {
       protocol: 'sw-pub',
+      label: label ?? '',
     });
     return {
       keyId: raw.key_id,
       publicKey: parseClientSetup(raw.client_setup),
+      label: raw.label,
     };
   }
 
   async deleteKey(keyId: string): Promise<void> {
     await this.authDelete(`/api/v1/challenge-key/${encodeURIComponent(keyId)}`);
+  }
+
+  /** Rename a key after creation. Pass an empty string to clear the label. */
+  async updateKeyLabel(keyId: string, label: string): Promise<void> {
+    await this.authPatch(`/api/v1/challenge-key/${encodeURIComponent(keyId)}`, { label });
   }
 
   // ---------------------------------------------------------------------------
@@ -155,7 +186,7 @@ export class PinionProverClient {
     const deadline = Date.now() + timeoutMs;
     for (;;) {
       const status = await this.tagStatus(jobId);
-      if (status.progress) options.onProgress?.(status.progress);
+      if (status.progress) options.onProgress?.(status.progress, status.status);
 
       if (status.status === 'tag-done') {
         return { block_ids: status.block_ids, block_count: status.block_count };
@@ -175,6 +206,22 @@ export class PinionProverClient {
     return this.get<TagJobStatusResponse>(`/api/v1/tag/${encodeURIComponent(jobId)}`);
   }
 
+  /**
+   * List the caller's tag jobs, most recently created first.
+   *
+   * Unlike tagStatus(), this doesn't require already knowing a job_id — use
+   * it to discover in-flight tagging after a page reload or from a
+   * different tab/device than the one that started it. Pass
+   * `{ active: true }` to list only non-terminal jobs (queued/planning/
+   * running/merging), which is what a "tagging in progress" indicator
+   * should poll.
+   */
+  async listTagJobs(options: { active?: boolean } = {}): Promise<TagJobListEntry[]> {
+    const query = options.active ? '?active=true' : '';
+    const resp = await this.get<TagJobListResponse>(`/api/v1/tag${query}`);
+    return resp.jobs;
+  }
+
   async deregister(keyId: string, root: string): Promise<void> {
     await this.authDelete(
       `/api/v1/register/${encodeURIComponent(keyId)}/${encodeURIComponent(root)}`,
@@ -188,15 +235,41 @@ export class PinionProverClient {
   /**
    * POST /prove — unauthenticated, the server resolves the account from key_id.
    *
-   * Returns the raw proof bytes. Most callers should use audit() instead,
-   * which also cryptographically verifies the response.
+   * Proving is asynchronous: this posts the challenge, then polls GET
+   * /prove/:job_id until the job reaches a terminal state, so the returned
+   * promise resolves only once a proof is actually ready (matching the
+   * pre-async blocking behavior). Returns the raw proof bytes. Most callers
+   * should use audit() instead, which also cryptographically verifies the
+   * response.
    *
    * @param keyId       Challenge key ID.
    * @param roots       CID strings to prove, in the same order as the challenge.
    * @param challenge   base64(JSON(WireChallenge)) from buildChallenge().
-   * @param challengeId Optional idempotency key echoed back in the response.
+   * @param challengeId Optional idempotency key. If a caller's own retry
+   *                    logic re-calls prove() for what is logically the
+   *                    same request (e.g. after a timeout with an unclear
+   *                    outcome), passing the same challengeId across those
+   *                    attempts makes the server return the original job
+   *                    instead of starting a redundant one. Leave unset for
+   *                    normal audit rounds — each is a fresh, independently
+   *                    random challenge, which should never be deduped
+   *                    against a previous one.
+   *
+   * Throws PinNotActiveError (409, checked synchronously before any job is
+   * created), ProveFailedError if the job reaches "prove-failed", or
+   * ProveTimeoutError if it doesn't reach a terminal state within
+   * options.timeoutMs.
    */
-  async prove(keyId: string, roots: string[], challenge: string, challengeId?: string): Promise<Uint8Array> {
+  async prove(
+    keyId: string,
+    roots: string[],
+    challenge: string,
+    challengeId?: string,
+    options: ProveOptions = {},
+  ): Promise<Uint8Array> {
+    const pollIntervalMs = options.pollIntervalMs ?? 500;
+    const timeoutMs = options.timeoutMs ?? 60 * 1000;
+
     const resp = await fetch(`${this.baseUrl}/prove`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
@@ -209,8 +282,27 @@ export class PinionProverClient {
     if (!resp.ok) {
       throw new ProverError(resp.status, await resp.text().catch(() => ''));
     }
-    const pr = await resp.json() as ProveResponse;
-    return base64ToBytes(pr.proof);
+    const { job_id: jobId } = await parseJsonBody<ProveJobResponse>(resp);
+
+    const deadline = Date.now() + timeoutMs;
+    for (;;) {
+      const status = await this.proveStatus(jobId);
+      if (status.status === 'prove-done') {
+        return base64ToBytes(status.proof ?? '');
+      }
+      if (status.status === 'prove-failed') {
+        throw new ProveFailedError(jobId, status.error ?? 'unknown error', challenge, roots);
+      }
+      if (Date.now() >= deadline) {
+        throw new ProveTimeoutError(jobId, status.status, challenge, roots);
+      }
+      await new Promise((resolve) => setTimeout(resolve, pollIntervalMs));
+    }
+  }
+
+  /** Poll the status of a proof job started by prove(). Exposed for callers that want to observe progress without waiting on prove()'s full promise. */
+  async proveStatus(jobId: string): Promise<ProveJobStatusResponse> {
+    return this.get<ProveJobStatusResponse>(`/prove/${encodeURIComponent(jobId)}`);
   }
 
   /**
@@ -254,14 +346,21 @@ export class PinionProverClient {
 
     const proofBytes = await this.prove(keyId, targetRoots, challenge);
 
-    const pass = verifyProof({
+    const verification = verifyProofResult({
       clientSetup: setup.clientSetup,
       blockIds: allBlockIds,
       challenge,
       proofBytes,
     });
 
-    return { pass, blocksChecked: challengeSize, keyId, roots: targetRoots };
+    return {
+      pass: verification.verified,
+      verification,
+      blocksChecked: challengeSize,
+      keyId,
+      roots: targetRoots,
+      challenge,
+    };
   }
 
   // ---------------------------------------------------------------------------
@@ -273,7 +372,7 @@ export class PinionProverClient {
       headers: await this.authHeaders(),
     });
     if (!resp.ok) throw await this.httpError(resp);
-    return resp.json() as Promise<T>;
+    return parseJsonBody<T>(resp);
   }
 
   private async post<T>(path: string, body: unknown): Promise<T> {
@@ -284,13 +383,22 @@ export class PinionProverClient {
     });
     if (!resp.ok) throw await this.httpError(resp);
     if (resp.status === 204) return undefined as T;
-    return resp.json() as Promise<T>;
+    return parseJsonBody<T>(resp);
   }
 
   private async authDelete(path: string): Promise<void> {
     const resp = await fetch(`${this.baseUrl}${path}`, {
       method: 'DELETE',
       headers: await this.authHeaders(),
+    });
+    if (!resp.ok) throw await this.httpError(resp);
+  }
+
+  private async authPatch(path: string, body: unknown): Promise<void> {
+    const resp = await fetch(`${this.baseUrl}${path}`, {
+      method: 'PATCH',
+      headers: { 'Content-Type': 'application/json', ...(await this.authHeaders()) },
+      body: JSON.stringify(body),
     });
     if (!resp.ok) throw await this.httpError(resp);
   }
@@ -307,6 +415,27 @@ export class PinionProverClient {
 }
 
 // ---------------------------------------------------------------------------
+// Shared response parsing
+// ---------------------------------------------------------------------------
+
+/**
+ * Parses resp's body as JSON, throwing MalformedResponseError (rather than
+ * a raw, untyped SyntaxError) if it isn't well-formed — e.g. a proxy or
+ * load balancer returning an HTML error page with a 200 status, or a
+ * response truncated mid-body. A non-2xx status is expected to have already
+ * been handled by the caller before this is reached; this only guards
+ * against a *successful* response whose body isn't what it claims to be.
+ */
+async function parseJsonBody<T>(resp: Response): Promise<T> {
+  const text = await resp.text();
+  try {
+    return JSON.parse(text) as T;
+  } catch (cause) {
+    throw new MalformedResponseError(resp.status, text.slice(0, 200), cause);
+  }
+}
+
+// ---------------------------------------------------------------------------
 // Errors
 // ---------------------------------------------------------------------------
 
@@ -317,6 +446,25 @@ export class ProverError extends Error {
   ) {
     super(`pinion-prover: HTTP ${status}: ${body}`);
     this.name = 'ProverError';
+  }
+}
+
+/**
+ * Thrown when a response has a successful HTTP status but a body that
+ * isn't valid JSON — this is what an infra problem often looks like from
+ * the client's perspective (a proxy's HTML error page returned with a 200,
+ * a response cut off mid-stream), as opposed to a clean non-2xx status
+ * (which surfaces as ProverError instead). bodyPreview is truncated to 200
+ * characters so a large unexpected body doesn't bloat error logs/messages.
+ */
+export class MalformedResponseError extends Error {
+  constructor(
+    public readonly status: number,
+    public readonly bodyPreview: string,
+    public readonly cause?: unknown,
+  ) {
+    super(`pinion-prover: malformed response body (HTTP ${status}): ${bodyPreview}`);
+    this.name = 'MalformedResponseError';
   }
 }
 
@@ -351,6 +499,34 @@ export class TagTimeoutError extends Error {
   ) {
     super(`tag job ${jobId} timed out (last status: ${lastStatus})`);
     this.name = 'TagTimeoutError';
+  }
+}
+
+/** Thrown by prove() when the async proof job reaches the "prove-failed" state. */
+export class ProveFailedError extends Error {
+  constructor(
+    public readonly jobId: string,
+    public readonly reason: string,
+    /** The challenge this job was for — base64(JSON(WireChallenge)), decode with decodeChallenge(). */
+    public readonly challenge: string,
+    public readonly roots: string[],
+  ) {
+    super(`prove job ${jobId} failed: ${reason}`);
+    this.name = 'ProveFailedError';
+  }
+}
+
+/** Thrown by prove() when the job hasn't reached a terminal state within the configured timeout. */
+export class ProveTimeoutError extends Error {
+  constructor(
+    public readonly jobId: string,
+    public readonly lastStatus: string,
+    /** The challenge this job was for — base64(JSON(WireChallenge)), decode with decodeChallenge(). */
+    public readonly challenge: string,
+    public readonly roots: string[],
+  ) {
+    super(`prove job ${jobId} timed out (last status: ${lastStatus})`);
+    this.name = 'ProveTimeoutError';
   }
 }
 

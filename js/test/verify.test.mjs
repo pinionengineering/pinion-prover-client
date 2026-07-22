@@ -20,14 +20,13 @@ const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const root = path.resolve(__dirname, '..');
 
 // Import the built library (dist/ must be up-to-date).
-const { verifyProof, parseClientSetup, base64ToBytes } = await import(
-  path.join(root, 'dist/index.js')
-);
+const { verifyProof, verifyProofResult, parseClientSetup, base64ToBytes, buildChallenge, decodeChallenge } =
+  await import(path.join(root, 'dist/index.js'));
 
 // ---------------------------------------------------------------------------
 // Load test vectors
 // ---------------------------------------------------------------------------
-const vecPath = path.join(root, 'testdata/vectors.json');
+const vecPath = path.resolve(root, '..', 'testdata/vectors.json');
 const vec = JSON.parse(fs.readFileSync(vecPath, 'utf8'));
 
 console.log(`\nTest vector: ${vec.description}`);
@@ -118,6 +117,70 @@ try {
 }
 assert(wrongKeyPassed === false, 'Test 4 FAILED: verifyProof should return false for wrong public key');
 console.log('  Test 4 PASS: wrong public key rejected');
+
+// ---------------------------------------------------------------------------
+// Test 5: verifyProofResult distinguishes malformed input from a real
+// pairing-mismatch — regression test for the bug where both cases
+// collapsed to an identical `false`, making an infra error (a proxy's
+// HTML error page, a truncated body) indistinguishable from genuine
+// evidence the server doesn't hold the data.
+// ---------------------------------------------------------------------------
+const garbageProofBytes = new TextEncoder().encode('<html>502 Bad Gateway</html>');
+const malformedResult = verifyProofResult({
+  clientSetup,
+  blockIds,
+  challenge,
+  proofBytes: garbageProofBytes,
+});
+assert(
+  malformedResult.verified === false && malformedResult.reason === 'malformed-input',
+  'Test 5a FAILED: verifyProofResult should report malformed-input for an unparseable body',
+);
+assert(
+  verifyProof({ clientSetup, blockIds, challenge, proofBytes: garbageProofBytes }) === false,
+  'Test 5a FAILED: verifyProof should still return false for the same input (back-compat)',
+);
+console.log('  Test 5a PASS: malformed/unparseable proof body reported as malformed-input, not pairing-mismatch');
+
+// tamperedProofBytes (Test 2) flips a byte inside the sigma G1 point, which
+// can corrupt the encoding badly enough to fail curve-point/scalar decoding
+// or range validation itself (a malformed-input case, not a
+// pairing-mismatch) — not a reliable pairing-mismatch fixture. Swapping two
+// (still individually valid) mu entries instead guarantees every value
+// decodes cleanly — each is a real scalar from the original valid proof —
+// while still applying the wrong coefficient to each u_j, so the pairing
+// check legitimately fails rather than throwing.
+assert(wireProof.mu.length >= 2, 'test vector needs at least 2 mu entries to swap');
+const swappedMu = [wireProof.mu[1], wireProof.mu[0], ...wireProof.mu.slice(2)];
+const scalarTamperedProofBytes = new TextEncoder().encode(
+  JSON.stringify({ sigma: wireProof.sigma, mu: swappedMu }),
+);
+const mismatchResult = verifyProofResult({
+  clientSetup,
+  blockIds,
+  challenge,
+  proofBytes: scalarTamperedProofBytes,
+});
+assert(
+  mismatchResult.verified === false && mismatchResult.reason === 'pairing-mismatch',
+  `Test 5b FAILED: verifyProofResult should report pairing-mismatch for a well-formed but wrong proof, got ${JSON.stringify(mismatchResult)}`,
+);
+console.log('  Test 5b PASS: well-formed but cryptographically wrong proof reported as pairing-mismatch');
+
+const validResult = verifyProofResult({ clientSetup, blockIds, challenge, proofBytes });
+assert(validResult.verified === true, 'Test 5c FAILED: verifyProofResult should report verified:true for a valid proof');
+console.log('  Test 5c PASS: valid proof reported as verified');
+
+// ---------------------------------------------------------------------------
+// Test 6: decodeChallenge is the exact inverse of buildChallenge
+// ---------------------------------------------------------------------------
+const builtChallenge = buildChallenge(5, 20);
+const decoded = decodeChallenge(builtChallenge);
+assert(decoded.suite_id === 1, 'Test 6 FAILED: suite_id should round-trip as 1');
+assert(decoded.c === 5, 'Test 6 FAILED: c should round-trip as 5');
+assert(decoded.n === 20, 'Test 6 FAILED: n should round-trip as 20');
+assert(typeof decoded.seed === 'string' && decoded.seed.length > 0, 'Test 6 FAILED: seed should be a non-empty string');
+console.log('  Test 6 PASS: decodeChallenge(buildChallenge(...)) round-trips suite_id/c/n/seed');
 
 // ---------------------------------------------------------------------------
 // Done
