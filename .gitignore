@@ -2,3 +2,7 @@ node_modules/
 dist/
 *.tsbuildinfo
 .env
+
+# Go
+go/cmd/testclient/testclient
+.prover-state.json
