@@ -1,4 +1,4 @@
-# @pinion/prover-client
+# @pinionengineering/prover-client
 
 JavaScript / TypeScript client for **pinion-prover** storage-proof service.
 
@@ -26,7 +26,7 @@ is the whole workflow, no account needed for the audit itself.
 ## Installation
 
 ```bash
-npm install @pinion/prover-client
+npm install @pinionengineering/prover-client
 ```
 
 Requires Node.js ≥ 18. Works in modern browsers with native `crypto.getRandomValues` and `atob`.
@@ -82,7 +82,7 @@ proof-of-storage evidence collected over time.
 ## Quick Start
 
 ```typescript
-import { PinionProverClient } from '@pinion/prover-client';
+import { PinionProverClient } from '@pinionengineering/prover-client';
 
 const client = new PinionProverClient('https://example.com/prover', {
   getToken: async () => myAuthService.getToken(),
@@ -288,7 +288,7 @@ challenge parameters.
 ##### `buildChallenge(n, totalBlocks)` → `string`
 
 ```typescript
-import { buildChallenge } from '@pinion/prover-client';
+import { buildChallenge } from '@pinionengineering/prover-client';
 
 const challenge = buildChallenge(10, setup.totalBlocks);
 // Returns base64(JSON({ suite_id: 1, seed: <32 random bytes>, c: 10, n: totalBlocks }))
@@ -309,7 +309,7 @@ Posts the challenge to `POST /prove` and returns the raw proof bytes.
 ##### `verifyProof(params)` → `boolean`
 
 ```typescript
-import { verifyProof } from '@pinion/prover-client';
+import { verifyProof } from '@pinionengineering/prover-client';
 
 const pass = verifyProof({
   clientSetup: setup.clientSetup,  // or publicKey from createKey()
@@ -326,7 +326,7 @@ offline verification or integration with existing infrastructure.
 ##### Full low-level example
 
 ```typescript
-import { PinionProverClient, buildChallenge, verifyProof } from '@pinion/prover-client';
+import { PinionProverClient, buildChallenge, verifyProof } from '@pinionengineering/prover-client';
 
 const client = new PinionProverClient(proverUrl, { getToken });
 
@@ -357,7 +357,7 @@ You can verify a proof with no HTTP client at all, as long as you have the
 public key and block IDs from a prior setup call:
 
 ```typescript
-import { buildChallenge, verifyProof, parseClientSetup } from '@pinion/prover-client';
+import { buildChallenge, verifyProof, parseClientSetup } from '@pinionengineering/prover-client';
 
 const clientSetup = parseClientSetup(storedClientSetupBase64);
 
