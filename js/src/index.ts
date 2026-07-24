@@ -10,7 +10,12 @@ export {
   ProveTimeoutError,
   parseSetupResponse,
 } from './client.js';
-export type { PinionProverClientOptions, AuditOptions, TagOptions, ProveOptions } from './client.js';
+export type {
+  PinionProverClientOptions,
+  AuditOptions,
+  WaitForTagOptions,
+  WaitForProveOptions,
+} from './client.js';
 
 // Verification
 export { verifyProof, verifyProofResult, parseClientSetup } from './verify.js';
@@ -50,6 +55,7 @@ export type {
   ProveResponse,
   ProveJobResponse,
   ProveJobStatusResponse,
+  ProveSubmission,
   RawTaggedRoot,
   RawSetupResponse,
   ParsedRoot,
@@ -60,6 +66,7 @@ export type {
   UpdateKeyLabelRequest,
   TagResponse,
   TagJobResponse,
+  TagSubmission,
   TagJobProgress,
   TagJobStatusResponse,
   TagJobListEntry,

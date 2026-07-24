@@ -58,6 +58,18 @@ export interface ProveJobResponse {
 }
 
 /**
+ * Result of prove()'s submit call: the proof job has been created and
+ * queued. Echoes challenge/roots back so a caller building progress UI (or
+ * later calling waitForProve()) doesn't have to thread them through
+ * separately.
+ */
+export interface ProveSubmission {
+  jobId: string;
+  challenge: string;
+  roots: string[];
+}
+
+/**
  * Raw status response from GET /prove/:job_id. This endpoint is
  * unauthenticated, same as POST /prove — job_id is a fresh, unguessable
  * identifier (or, when the request carried a challenge_id, deterministic
@@ -189,6 +201,17 @@ export interface TagResponse {
 /** Returned by POST /api/v1/tag: the tag job has been created and queued. */
 export interface TagJobResponse {
   job_id: string;
+}
+
+/**
+ * Result of tag()'s submit call: the tag job has been created and queued.
+ * Echoes root/keyId back so a caller doesn't have to thread them through
+ * separately to waitForTag() or a progress indicator.
+ */
+export interface TagSubmission {
+  jobId: string;
+  root: string;
+  keyId: string;
 }
 
 /** How much of an in-flight tag job has completed. */

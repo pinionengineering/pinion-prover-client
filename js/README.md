@@ -31,6 +31,24 @@ npm install @pinionengineering/prover-client
 
 Requires Node.js ≥ 18. Works in modern browsers with native `crypto.getRandomValues` and `atob`.
 
+### Upgrading from 0.10.x
+
+`tag()` and `prove()` are now **submit-only**: they return a job handle
+immediately (`{ jobId, ... }`) instead of blocking until the job finishes.
+Await the new `waitForTag(jobId, options?)` / `waitForProve(jobId, options?)`
+to wait for a terminal state, or poll `tagStatus(jobId)`/`proveStatus(jobId)`
+yourself. There is **no default deadline anymore** — the old hardcoded 60s
+(`prove`)/10min (`tag`) timeouts are gone, since a proof or tag job can
+legitimately take longer and the server was never designed to respect an
+arbitrary client-side ceiling. If you want the old ceiling back, it's a
+strict superset away: pass `signal: AbortSignal.timeout(ms)` to
+`waitForProve()`/`waitForTag()`/`audit()`.
+
+`audit(keyId, setup)` is unchanged in shape — still one call that submits,
+waits, and verifies — but now also accepts `pollIntervalMs`/`signal`/
+`onStatus` so you can build progress UI or cancel a long-running round; see
+its section below.
+
 ---
 
 ## How It Works
@@ -46,9 +64,12 @@ The protocol has two distinct phases:
      These are the values needed to verify proofs; store them if you want to verify
      independently of the server later.
 
-2. Call `tag(cid, keyId)` for each pinned CID.  The server walks the IPFS DAG,
-   computes per-block authentication tags, and stores them.  It returns the **block IDs**
-   for that root: the `CID.Bytes()` of every block in the DAG, in TagList order.
+2. Call `tag(cid, keyId)` for each pinned CID, then `waitForTag(jobId)`.
+   Tagging is asynchronous — `tag()` submits the job and returns a job
+   handle immediately; the server walks the IPFS DAG, computes per-block
+   authentication tags, and stores them in the background. `waitForTag()`
+   polls until it's done and returns the **block IDs** for that root: the
+   `CID.Bytes()` of every block in the DAG, in TagList order.
 
 3. Call `getSetup(keyId)` to fetch the full setup document.  The response contains:
    - The public key (same as returned by `createKey()`)
@@ -93,8 +114,10 @@ const client = new PinionProverClient('https://example.com/prover', {
 // Create a key: returns the key ID and the public half of the key pair.
 const { keyId, publicKey } = await client.createKey();
 
-// Tag a pinned CID: the server walks the DAG and stores per-block auth tags.
-await client.tag('bafybeigdyrzt...', keyId);
+// Tag a pinned CID: submits the job, then waits (no default deadline) for
+// the server to walk the DAG and store per-block auth tags.
+const tagJob = await client.tag('bafybeigdyrzt...', keyId);
+await client.waitForTag(tagJob.jobId);
 
 // Fetch the setup document: public key + block ID lists for all tagged roots.
 const setup = await client.getSetup(keyId);
@@ -184,10 +207,23 @@ Deletes a key and all associated tags.
 
 ### Setup Phase
 
-#### `client.tag(root, keyId)` → `TagResponse`
+#### `client.tag(root, keyId)` → `TagSubmission`
 
 ```typescript
-const { block_ids, block_count } = await client.tag(cid, keyId);
+const { jobId } = await client.tag(cid, keyId);
+```
+
+Instructs the server to walk the IPFS DAG for `root`, compute per-block
+authentication tags, and store them under `keyId`. The CID must be in the
+`"pinned"` lifecycle state for the authenticated account. Submits the job
+and returns immediately — this does not wait for tagging to finish.
+
+#### `client.waitForTag(jobId, options?)` → `TagResponse`
+
+```typescript
+const { block_ids, block_count } = await client.waitForTag(jobId, {
+  onProgress: (progress, status) => console.log(status, progress),
+});
 // Exactly one is populated, depending on the key's protocol:
 // block_ids:   string[]: base64(CID.Bytes()) for every block, non-chunked
 //              protocols only (Ateniese, Erway, BJO), in TagList order
@@ -195,9 +231,10 @@ const { block_ids, block_count } = await client.tag(cid, keyId);
 //              (SW-Priv, SW-Pub): no per-block manifest is sent at all
 ```
 
-Instructs the server to walk the IPFS DAG for `root`, compute per-block
-authentication tags, and store them under `keyId`.  The CID must be in the
-`"pinned"` lifecycle state for the authenticated account.
+Polls `tagStatus(jobId)` until the job reaches a terminal state. **No
+default deadline** — waits as long as tagging takes unless `options.signal`
+is given and fires first, in which case it throws `TagTimeoutError`. Throws
+`TagFailedError` if the job reaches `"tag-failed"`.
 
 For non-chunked protocols, `block_ids` is the full list of blocks for this
 root in the order both client and server will use when ranking against a
@@ -205,6 +242,12 @@ challenge seed.  For chunked protocols, `block_count` is all the client needs:
 challenge ids are synthesized locally via `superBlockId(rootBytes, i)` for
 `i` in `[0, block_count)`.  Call `getSetup()` after tagging to get the
 combined list/count across all roots.
+
+| `WaitForTagOptions` field | Type | Default | Description |
+|-------|------|---------|-------------|
+| `pollIntervalMs` | `number` | `1000` | Milliseconds between status polls. |
+| `signal` | `AbortSignal` | none | Optional cancellation — no default deadline. |
+| `onProgress` | `(progress, status) => void` | none | Called after every poll with `{total_blocks, completed_blocks}` and the raw status string. |
 
 #### `client.getSetup(keyId)` → `ParsedSetup`
 
@@ -274,13 +317,17 @@ const result = await client.audit(keyId, setup, {
 |-------|------|---------|-------------|
 | `roots` | `string[]` | all roots | Subset of registered CIDs to challenge. |
 | `challengePct` | `number` | `1` | Percentage of blocks to sample (0–100). |
+| `pollIntervalMs` | `number` | `500` | Milliseconds between status polls during the wait phase. |
+| `signal` | `AbortSignal` | none | Optional cancellation — no default deadline, waits as long as the proof takes unless this fires. Pass `AbortSignal.timeout(ms)` for a fixed ceiling. |
+| `onStatus` | `(status: string) => void` | none | Called after every poll with the raw status string — proving has no per-block progress signal, unlike tagging. |
 
 Throws `PinNotActiveError` if any root is no longer in the `"pinned"` state.
-Throws `ProverError` on HTTP errors from the server.
+Throws `ProverError` on HTTP errors from the server. Throws
+`ProveTimeoutError` if `options.signal` fires before the proof completes.
 
 ---
 
-#### Low-level: `buildChallenge` + `prove` + `verifyProof`
+#### Low-level: `buildChallenge` + `prove` + `waitForProve` + `verifyProof`
 
 Use these when you need an exact block count or want full control over the
 challenge parameters.
@@ -298,13 +345,29 @@ Generates a random 32-byte seed and encodes a WireChallenge requesting `n` block
 out of `totalBlocks`.  Both client and server independently apply HMAC-SHA256 to
 the seed to rank all block IDs and arrive at the same `n` blocks in the same order.
 
-##### `client.prove(keyId, roots, challenge)` → `Uint8Array`
+##### `client.prove(keyId, roots, challenge)` → `ProveSubmission`
 
 ```typescript
-const proofBytes = await client.prove(keyId, roots, challenge);
+const { jobId } = await client.prove(keyId, roots, challenge);
 ```
 
-Posts the challenge to `POST /prove` and returns the raw proof bytes.
+Posts the challenge to `POST /prove` and returns immediately with a job
+handle — this does not wait for the proof to be computed.
+
+##### `client.waitForProve(jobId, options?)` → `Uint8Array`
+
+```typescript
+const proofBytes = await client.waitForProve(jobId, {
+  challenge, roots, // optional, but lets a thrown error carry enough to retry
+  signal: AbortSignal.timeout(60_000), // optional — no default deadline otherwise
+});
+```
+
+Polls `proveStatus(jobId)` until the job reaches a terminal state and
+returns the raw proof bytes. **No default deadline** — waits as long as the
+proof takes unless `options.signal` fires first, in which case it throws
+`ProveTimeoutError`. Throws `ProveFailedError` if the job reaches
+`"prove-failed"`.
 
 ##### `verifyProof(params)` → `boolean`
 
@@ -332,14 +395,16 @@ const client = new PinionProverClient(proverUrl, { getToken });
 
 // Setup phase
 const { keyId } = await client.createKey();
-await client.tag(cid, keyId);
+const tagJob = await client.tag(cid, keyId);
+await client.waitForTag(tagJob.jobId);
 const setup = await client.getSetup(keyId);
 
 // Audit phase: exact block count
 const root     = setup.roots[0]!;
 const blockIds = root.blockIds;
-const challenge  = buildChallenge(10, blockIds.length);
-const proofBytes = await client.prove(keyId, [root.root], challenge);
+const challenge = buildChallenge(10, blockIds.length);
+const submission = await client.prove(keyId, [root.root], challenge);
+const proofBytes = await client.waitForProve(submission.jobId, { challenge, roots: [root.root] });
 
 const pass = verifyProof({
   clientSetup: setup.clientSetup,
@@ -520,11 +585,17 @@ npm run test:gen
 npm test
 ```
 
-The test suite verifies:
+`test/verify.test.mjs` verifies the cross-language crypto correctness:
 1. Valid proof accepted
 2. Tampered sigma rejected
 3. Wrong block IDs rejected
 4. Wrong public key rejected
+
+`test/client.test.mjs` covers `PinionProverClient`'s submit/wait polling
+model against a hand-rolled `fetch` stub: `prove()`/`tag()` submit without
+polling, `waitForProve()`/`waitForTag()` poll to completion with no
+implicit deadline, an `AbortSignal` cancels promptly, and `audit()`'s
+`onStatus`/`pollIntervalMs` options reach the underlying poll.
 
 ---
 

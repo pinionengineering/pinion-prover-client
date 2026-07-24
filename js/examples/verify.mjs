@@ -86,7 +86,12 @@ async function main() {
 
   if (toTag.length > 0) {
     console.log(`[tag]   registering ${toTag.length} new CID(s)...`);
-    await Promise.all(toTag.map(cid => client.tag(cid, keyId)));
+    // tag() submits and returns immediately; waitForTag() has no default
+    // deadline, so this waits as long as the DAG walk actually takes.
+    await Promise.all(toTag.map(async cid => {
+      const { jobId } = await client.tag(cid, keyId);
+      await client.waitForTag(jobId);
+    }));
     console.log('[tag]   done');
   }
 

@@ -18,6 +18,7 @@ import type {
   ParsedRoot,
   ProveJobResponse,
   ProveJobStatusResponse,
+  ProveSubmission,
   RawSetupResponse,
   TagJobListEntry,
   TagJobListResponse,
@@ -25,6 +26,7 @@ import type {
   TagJobResponse,
   TagJobStatusResponse,
   TagResponse,
+  TagSubmission,
   WireClientSetup,
 } from './types.js';
 import { buildChallenge, base64ToBytes, superBlockId } from './challenge.js';
@@ -43,7 +45,7 @@ export interface PinionProverClientOptions {
  * Options for the audit() convenience wrapper.
  *
  * For exact control over block count, use buildChallenge(n, total) +
- * prove() + verifyProof() directly.
+ * prove() + waitForProve() + verifyProof() directly.
  */
 export interface AuditOptions {
   /**
@@ -59,14 +61,32 @@ export interface AuditOptions {
    * For an exact block count use buildChallenge(n, total) + prove() + verifyProof().
    */
   challengePct?: number;
+  /** Milliseconds between GET /prove/:job_id polls during audit()'s wait
+   * phase. Default 500. */
+  pollIntervalMs?: number;
+  /**
+   * Optional cancellation of audit()'s wait phase. There is no default
+   * deadline — omit to wait as long as the proof takes. Pass
+   * `AbortSignal.timeout(ms)` to restore a fixed ceiling.
+   */
+  signal?: AbortSignal;
+  /** Called after every status poll with the raw status string
+   * ("prove-queued" | "prove-running") — for progress UI. There is no
+   * per-block progress signal for proving, unlike tag()'s onProgress. */
+  onStatus?: (status: string) => void;
 }
 
-/** Options for tag()'s internal job-status polling. */
-export interface TagOptions {
+/** Options for waitForTag()'s job-status polling. */
+export interface WaitForTagOptions {
   /** Milliseconds between GET /tag/:job_id polls. Default 1000. */
   pollIntervalMs?: number;
-  /** Give up and throw TagTimeoutError after this long. Default 10 minutes. */
-  timeoutMs?: number;
+  /**
+   * Optional cancellation. There is no default deadline — omit to wait
+   * indefinitely. Pass `AbortSignal.timeout(ms)` to restore the old fixed
+   * ceiling (waitForTag() throws TagTimeoutError when the signal fires
+   * before the job reaches a terminal state).
+   */
+  signal?: AbortSignal;
   /**
    * Called after every status poll with the latest progress and the raw
    * status string ("tag-queued" | "tag-planning" | "tag-running" |
@@ -79,17 +99,28 @@ export interface TagOptions {
   onProgress?: (progress: TagJobProgress, status: string) => void;
 }
 
-/** Options for prove()'s internal job-status polling. */
-export interface ProveOptions {
+/** Options for waitForProve()'s job-status polling. */
+export interface WaitForProveOptions {
   /** Milliseconds between GET /prove/:job_id polls. Default 500. */
   pollIntervalMs?: number;
   /**
-   * Give up and throw ProveTimeoutError after this long. Default 60
-   * seconds — much shorter than tag()'s default, since a proof round is one
-   * bounded crypto operation over the sampled blocks, not a per-block loop
-   * over an entire file.
+   * Optional cancellation. There is no default deadline — omit to wait
+   * indefinitely. Pass `AbortSignal.timeout(ms)` to restore the old fixed
+   * ceiling (waitForProve() throws ProveTimeoutError when the signal fires
+   * before the job reaches a terminal state).
    */
-  timeoutMs?: number;
+  signal?: AbortSignal;
+  /**
+   * The challenge/roots this job was submitted with. Optional, but passing
+   * them lets a thrown ProveFailedError/ProveTimeoutError carry enough to
+   * reconstruct a retry — pass what prove() gave you back.
+   */
+  challenge?: string;
+  roots?: string[];
+  /** Called after every status poll with the raw status string
+   * ("prove-queued" | "prove-running"). There is no per-block progress
+   * signal for proving, unlike waitForTag()'s onProgress. */
+  onStatus?: (status: string) => void;
 }
 
 export class PinionProverClient {
@@ -163,47 +194,58 @@ export class PinionProverClient {
    * authentication tags, and store them under keyId.
    *
    * The root must already be in the "pinned" lifecycle state for the
-   * authenticated account.  Tagging runs asynchronously on the server —
-   * this enqueues the job and polls GET /api/v1/tag/:job_id until it
-   * reaches a terminal state, so the returned promise resolves only once
-   * tagging is actually done (matching the pre-async blocking behavior).
-   * Call getSetup() after tagging to get the updated block ID lists for the
-   * next audit cycle.
-   *
-   * Throws TagFailedError if the job reaches "tag-failed", or
-   * TagTimeoutError if it doesn't reach a terminal state within
-   * options.timeoutMs.
+   * authenticated account. Tagging runs asynchronously on the server — this
+   * submits the job and returns immediately with a job handle. Poll
+   * tagStatus(jobId) yourself, or await waitForTag(jobId, options) to wait
+   * for a terminal state (with no default deadline — pass `signal:
+   * AbortSignal.timeout(ms)` if you want one). Call getSetup() after
+   * tagging completes to get the updated block ID lists for the next audit
+   * cycle.
    */
-  async tag(root: string, keyId: string, options: TagOptions = {}): Promise<TagResponse> {
-    const pollIntervalMs = options.pollIntervalMs ?? 1000;
-    const timeoutMs = options.timeoutMs ?? 10 * 60 * 1000;
-
+  async tag(root: string, keyId: string): Promise<TagSubmission> {
     const { job_id: jobId } = await this.post<TagJobResponse>('/api/v1/tag', {
       root,
       key_id: keyId,
     });
-
-    const deadline = Date.now() + timeoutMs;
-    for (;;) {
-      const status = await this.tagStatus(jobId);
-      if (status.progress) options.onProgress?.(status.progress, status.status);
-
-      if (status.status === 'tag-done') {
-        return { block_ids: status.block_ids, block_count: status.block_count };
-      }
-      if (status.status === 'tag-failed') {
-        throw new TagFailedError(jobId, status.error ?? 'unknown error');
-      }
-      if (Date.now() >= deadline) {
-        throw new TagTimeoutError(jobId, status.status);
-      }
-      await new Promise((resolve) => setTimeout(resolve, pollIntervalMs));
-    }
+    return { jobId, root, keyId };
   }
 
-  /** Poll the status of a tag job started by tag(). Exposed for callers that want progress UI without waiting on tag()'s full promise. */
+  /** Poll the status of a tag job started by tag(). Exposed for callers that want progress UI without waiting on waitForTag()'s full promise. */
   async tagStatus(jobId: string): Promise<TagJobStatusResponse> {
     return this.get<TagJobStatusResponse>(`/api/v1/tag/${encodeURIComponent(jobId)}`);
+  }
+
+  /**
+   * Wait for a tag job started by tag() to reach a terminal state, polling
+   * tagStatus(jobId) on an interval.
+   *
+   * There is no default deadline — this waits as long as the job takes
+   * unless options.signal is given and fires first, in which case it
+   * throws TagTimeoutError with the last-seen status. Throws TagFailedError
+   * if the job reaches "tag-failed".
+   */
+  async waitForTag(jobId: string, options: WaitForTagOptions = {}): Promise<TagResponse> {
+    const pollIntervalMs = options.pollIntervalMs ?? 1000;
+    const status = await pollUntilTerminal({
+      fetchStatus: () => this.tagStatus(jobId),
+      isTerminal: (s) => s.status === 'tag-done' || s.status === 'tag-failed',
+      pollIntervalMs,
+      signal: options.signal,
+      onTick: (s) => {
+        if (s.progress) options.onProgress?.(s.progress, s.status);
+      },
+    }).catch((e) => {
+      if (e instanceof PollAbortedError) {
+        const last = e.lastStatus as TagJobStatusResponse | undefined;
+        throw new TagTimeoutError(jobId, last?.status ?? 'unknown');
+      }
+      throw e;
+    });
+
+    if (status.status === 'tag-failed') {
+      throw new TagFailedError(jobId, status.error ?? 'unknown error');
+    }
+    return { block_ids: status.block_ids, block_count: status.block_count };
   }
 
   /**
@@ -235,41 +277,35 @@ export class PinionProverClient {
   /**
    * POST /prove — unauthenticated, the server resolves the account from key_id.
    *
-   * Proving is asynchronous: this posts the challenge, then polls GET
-   * /prove/:job_id until the job reaches a terminal state, so the returned
-   * promise resolves only once a proof is actually ready (matching the
-   * pre-async blocking behavior). Returns the raw proof bytes. Most callers
-   * should use audit() instead, which also cryptographically verifies the
-   * response.
+   * Proving is asynchronous: this submits the challenge and returns
+   * immediately with a job handle. Poll proveStatus(jobId) yourself, or
+   * await waitForProve(jobId, options) to wait for a terminal state (with
+   * no default deadline — pass `signal: AbortSignal.timeout(ms)` if you
+   * want one). Most callers should use audit() instead, which submits,
+   * waits, and cryptographically verifies the response in one call.
    *
    * @param keyId       Challenge key ID.
    * @param roots       CID strings to prove, in the same order as the challenge.
    * @param challenge   base64(JSON(WireChallenge)) from buildChallenge().
    * @param challengeId Optional idempotency key. If a caller's own retry
    *                    logic re-calls prove() for what is logically the
-   *                    same request (e.g. after a timeout with an unclear
-   *                    outcome), passing the same challengeId across those
-   *                    attempts makes the server return the original job
-   *                    instead of starting a redundant one. Leave unset for
-   *                    normal audit rounds — each is a fresh, independently
-   *                    random challenge, which should never be deduped
-   *                    against a previous one.
+   *                    same request (e.g. after giving up waiting on an
+   *                    earlier attempt with an unclear outcome), passing the
+   *                    same challengeId across those attempts makes the
+   *                    server return the original job instead of starting a
+   *                    redundant one. Leave unset for normal audit rounds —
+   *                    each is a fresh, independently random challenge,
+   *                    which should never be deduped against a previous one.
    *
    * Throws PinNotActiveError (409, checked synchronously before any job is
-   * created), ProveFailedError if the job reaches "prove-failed", or
-   * ProveTimeoutError if it doesn't reach a terminal state within
-   * options.timeoutMs.
+   * created) or ProverError for any other non-2xx submit response.
    */
   async prove(
     keyId: string,
     roots: string[],
     challenge: string,
     challengeId?: string,
-    options: ProveOptions = {},
-  ): Promise<Uint8Array> {
-    const pollIntervalMs = options.pollIntervalMs ?? 500;
-    const timeoutMs = options.timeoutMs ?? 60 * 1000;
-
+  ): Promise<ProveSubmission> {
     const resp = await fetch(`${this.baseUrl}/prove`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
@@ -283,26 +319,43 @@ export class PinionProverClient {
       throw new ProverError(resp.status, await resp.text().catch(() => ''));
     }
     const { job_id: jobId } = await parseJsonBody<ProveJobResponse>(resp);
-
-    const deadline = Date.now() + timeoutMs;
-    for (;;) {
-      const status = await this.proveStatus(jobId);
-      if (status.status === 'prove-done') {
-        return base64ToBytes(status.proof ?? '');
-      }
-      if (status.status === 'prove-failed') {
-        throw new ProveFailedError(jobId, status.error ?? 'unknown error', challenge, roots);
-      }
-      if (Date.now() >= deadline) {
-        throw new ProveTimeoutError(jobId, status.status, challenge, roots);
-      }
-      await new Promise((resolve) => setTimeout(resolve, pollIntervalMs));
-    }
+    return { jobId, challenge, roots };
   }
 
-  /** Poll the status of a proof job started by prove(). Exposed for callers that want to observe progress without waiting on prove()'s full promise. */
+  /** Poll the status of a proof job started by prove(). Exposed for callers that want to observe progress without waiting on waitForProve()'s full promise. */
   async proveStatus(jobId: string): Promise<ProveJobStatusResponse> {
     return this.get<ProveJobStatusResponse>(`/prove/${encodeURIComponent(jobId)}`);
+  }
+
+  /**
+   * Wait for a proof job started by prove() to reach a terminal state,
+   * polling proveStatus(jobId) on an interval. Returns the raw proof bytes.
+   *
+   * There is no default deadline — this waits as long as the proof takes
+   * unless options.signal is given and fires first, in which case it
+   * throws ProveTimeoutError with the last-seen status. Throws
+   * ProveFailedError if the job reaches "prove-failed".
+   */
+  async waitForProve(jobId: string, options: WaitForProveOptions = {}): Promise<Uint8Array> {
+    const pollIntervalMs = options.pollIntervalMs ?? 500;
+    const status = await pollUntilTerminal({
+      fetchStatus: () => this.proveStatus(jobId),
+      isTerminal: (s) => s.status === 'prove-done' || s.status === 'prove-failed',
+      pollIntervalMs,
+      signal: options.signal,
+      onTick: (s) => options.onStatus?.(s.status),
+    }).catch((e) => {
+      if (e instanceof PollAbortedError) {
+        const last = e.lastStatus as ProveJobStatusResponse | undefined;
+        throw new ProveTimeoutError(jobId, last?.status ?? 'unknown', options.challenge, options.roots);
+      }
+      throw e;
+    });
+
+    if (status.status === 'prove-failed') {
+      throw new ProveFailedError(jobId, status.error ?? 'unknown error', options.challenge, options.roots);
+    }
+    return base64ToBytes(status.proof ?? '');
   }
 
   /**
@@ -324,6 +377,10 @@ export class PinionProverClient {
    * const result = await client.audit(keyId, setup, { challengePct: 100 });
    * ```
    *
+   * Waits for the proof with no default deadline — pass `options.signal` if
+   * you want to cancel or bound how long this waits (e.g.
+   * `AbortSignal.timeout(60_000)` for the old fixed ceiling).
+   *
    * Throws `PinNotActiveError` if any challenged root is no longer pinned.
    */
   async audit(keyId: string, setup: ParsedSetup, options: AuditOptions = {}): Promise<AuditResult> {
@@ -344,7 +401,14 @@ export class PinionProverClient {
     const challengeSize = Math.max(1, Math.round((challengePct / 100) * allBlockIds.length));
     const challenge = buildChallenge(challengeSize, allBlockIds.length);
 
-    const proofBytes = await this.prove(keyId, targetRoots, challenge);
+    const submission = await this.prove(keyId, targetRoots, challenge);
+    const proofBytes = await this.waitForProve(submission.jobId, {
+      pollIntervalMs: options.pollIntervalMs,
+      signal: options.signal,
+      challenge,
+      roots: targetRoots,
+      onStatus: options.onStatus,
+    });
 
     const verification = verifyProofResult({
       clientSetup: setup.clientSetup,
@@ -436,6 +500,67 @@ async function parseJsonBody<T>(resp: Response): Promise<T> {
 }
 
 // ---------------------------------------------------------------------------
+// Shared polling loop for waitForProve()/waitForTag()
+// ---------------------------------------------------------------------------
+
+/**
+ * Internal signal that a poll loop was cancelled via its caller-supplied
+ * AbortSignal before the job reached a terminal state. waitForProve()/
+ * waitForTag() catch this and rethrow as ProveTimeoutError/TagTimeoutError
+ * carrying lastStatus — never thrown to the outside on its own.
+ */
+class PollAbortedError extends Error {
+  constructor(public readonly lastStatus: unknown) {
+    super('poll aborted');
+    this.name = 'PollAbortedError';
+  }
+}
+
+/**
+ * Polls fetchStatus() every pollIntervalMs until isTerminal(status) is
+ * true, calling onTick(status) after every poll (terminal or not) so
+ * callers can drive progress callbacks. Has NO built-in deadline — the
+ * caller's polling budget is unlimited unless `signal` is given, in which
+ * case an abort rejects with PollAbortedError(lastStatus) instead of
+ * resolving.
+ */
+async function pollUntilTerminal<TStatus>(opts: {
+  fetchStatus: () => Promise<TStatus>;
+  isTerminal: (status: TStatus) => boolean;
+  pollIntervalMs: number;
+  signal?: AbortSignal;
+  onTick?: (status: TStatus) => void;
+}): Promise<TStatus> {
+  let last: TStatus | undefined;
+  for (;;) {
+    if (opts.signal?.aborted) throw new PollAbortedError(last);
+    const status = await opts.fetchStatus();
+    last = status;
+    opts.onTick?.(status);
+    if (opts.isTerminal(status)) return status;
+    await sleepOrAbort(opts.pollIntervalMs, opts.signal, last);
+  }
+}
+
+function sleepOrAbort<T>(ms: number, signal: AbortSignal | undefined, lastStatus: T): Promise<void> {
+  return new Promise((resolve, reject) => {
+    if (signal?.aborted) {
+      reject(new PollAbortedError(lastStatus));
+      return;
+    }
+    const timer = setTimeout(resolve, ms);
+    signal?.addEventListener(
+      'abort',
+      () => {
+        clearTimeout(timer);
+        reject(new PollAbortedError(lastStatus));
+      },
+      { once: true },
+    );
+  });
+}
+
+// ---------------------------------------------------------------------------
 // Errors
 // ---------------------------------------------------------------------------
 
@@ -480,7 +605,7 @@ export class PinNotActiveError extends Error {
   }
 }
 
-/** Thrown by tag() when the async tag job reaches the "tag-failed" state. */
+/** Thrown by waitForTag() when the async tag job reaches the "tag-failed" state. */
 export class TagFailedError extends Error {
   constructor(
     public readonly jobId: string,
@@ -491,7 +616,12 @@ export class TagFailedError extends Error {
   }
 }
 
-/** Thrown by tag() when the job hasn't reached a terminal state within the configured timeout. */
+/**
+ * Thrown by waitForTag() when its `options.signal` fires before the job
+ * reaches a terminal state. There is no default deadline anymore — this
+ * only happens if the caller opted into one (e.g. `signal:
+ * AbortSignal.timeout(ms)`).
+ */
 export class TagTimeoutError extends Error {
   constructor(
     public readonly jobId: string,
@@ -502,28 +632,33 @@ export class TagTimeoutError extends Error {
   }
 }
 
-/** Thrown by prove() when the async proof job reaches the "prove-failed" state. */
+/** Thrown by waitForProve() when the async proof job reaches the "prove-failed" state. */
 export class ProveFailedError extends Error {
   constructor(
     public readonly jobId: string,
     public readonly reason: string,
-    /** The challenge this job was for — base64(JSON(WireChallenge)), decode with decodeChallenge(). */
-    public readonly challenge: string,
-    public readonly roots: string[],
+    /** The challenge this job was for — base64(JSON(WireChallenge)), decode with decodeChallenge(). Undefined if the caller didn't pass one to waitForProve(). */
+    public readonly challenge: string | undefined,
+    public readonly roots: string[] | undefined,
   ) {
     super(`prove job ${jobId} failed: ${reason}`);
     this.name = 'ProveFailedError';
   }
 }
 
-/** Thrown by prove() when the job hasn't reached a terminal state within the configured timeout. */
+/**
+ * Thrown by waitForProve() when its `options.signal` fires before the job
+ * reaches a terminal state. There is no default deadline anymore — this
+ * only happens if the caller opted into one (e.g. `signal:
+ * AbortSignal.timeout(ms)`).
+ */
 export class ProveTimeoutError extends Error {
   constructor(
     public readonly jobId: string,
     public readonly lastStatus: string,
-    /** The challenge this job was for — base64(JSON(WireChallenge)), decode with decodeChallenge(). */
-    public readonly challenge: string,
-    public readonly roots: string[],
+    /** The challenge this job was for — base64(JSON(WireChallenge)), decode with decodeChallenge(). Undefined if the caller didn't pass one to waitForProve(). */
+    public readonly challenge: string | undefined,
+    public readonly roots: string[] | undefined,
   ) {
     super(`prove job ${jobId} timed out (last status: ${lastStatus})`);
     this.name = 'ProveTimeoutError';
