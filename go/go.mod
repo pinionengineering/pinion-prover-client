@@ -5,7 +5,7 @@ go 1.26.4
 require (
 	github.com/ipfs/go-cid v0.6.1
 	github.com/joho/godotenv v1.5.1
-	github.com/pinionengineering/ipfs-storage-proofs v0.0.0-20260720045054-21369b252d1e
+	github.com/pinionengineering/ipfs-storage-proofs v0.0.0-20260723224208-0e7c0836275b
 	github.com/pinionengineering/storage-proofs v0.0.0-20260723224100-8788b65ebed6
 	github.com/spf13/cobra v1.10.2
 	github.com/spf13/viper v1.21.0

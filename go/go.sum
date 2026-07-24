@@ -88,6 +88,8 @@ github.com/pelletier/go-toml/v2 v2.2.4 h1:mye9XuhQ6gvn5h28+VilKrrPoQVanw5PMw/TB0
 github.com/pelletier/go-toml/v2 v2.2.4/go.mod h1:2gIqNv+qfxSVS7cM2xJQKtLSTLUE9V8t9Stt+h56mCY=
 github.com/pinionengineering/ipfs-storage-proofs v0.0.0-20260720045054-21369b252d1e h1:GOE0Ip7l0avuy8dXnNX7pzufXZaTfH+x7iKLVDquyB4=
 github.com/pinionengineering/ipfs-storage-proofs v0.0.0-20260720045054-21369b252d1e/go.mod h1:3NTGJhU8G3DPfVkwsRn2zfqeQYWIYSvzMM2s2pWJ8Qc=
+github.com/pinionengineering/ipfs-storage-proofs v0.0.0-20260723224208-0e7c0836275b h1:n2GRgR//y82+5gwd1eH38X5MxDiB0k5rnwsm2UJQBZM=
+github.com/pinionengineering/ipfs-storage-proofs v0.0.0-20260723224208-0e7c0836275b/go.mod h1:Eqh1FvDfLzOXe5FJon4z25mgE6uLxNfV6WTTYxkOoc0=
 github.com/pinionengineering/storage-proofs v0.0.0-20260719224339-6dcb7f925a46 h1:zZNvb9n3CnoepbkMQKtBBChBeoBbe6LwmgXSBIYf09s=
 github.com/pinionengineering/storage-proofs v0.0.0-20260719224339-6dcb7f925a46/go.mod h1:+Jcuns3neGmWHerdrCEVnBe1FrzG1qgkq97NEZoa49U=
 github.com/pinionengineering/storage-proofs v0.0.0-20260723224100-8788b65ebed6 h1:p05m4YDPxZssDxuPaACI/wtSe9GXHkuORevRYRfs8R0=
