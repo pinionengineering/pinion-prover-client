@@ -136,8 +136,13 @@ func tagCmd() *cobra.Command {
 				st.Roots = make(map[string]rootInfo)
 			}
 
+			c := client()
 			for _, root := range roots {
-				result, err := client().Tag(cmd.Context(), root, st.KeyID, &proverclient.TagOptions{
+				sub, err := c.Tag(cmd.Context(), root, st.KeyID)
+				if err != nil {
+					return fmt.Errorf("tag %s: %w", root, err)
+				}
+				result, err := c.WaitForTag(cmd.Context(), sub.JobID, &proverclient.WaitForTagOptions{
 					OnProgress: func(p proverclient.TagJobProgress, status string) {
 						fmt.Printf("  %s  %s  %d/%d blocks\n", root, status, p.CompletedBlocks, p.TotalBlocks)
 					},
@@ -323,7 +328,12 @@ func proveCmd() *cobra.Command {
 				return fmt.Errorf("no pending challenge: run challenge first")
 			}
 
-			proof, err := client().Prove(cmd.Context(), st.KeyID, st.Pending.Roots, st.Pending.Challenge, "", nil)
+			c := client()
+			sub, err := c.Prove(cmd.Context(), st.KeyID, st.Pending.Roots, st.Pending.Challenge, "")
+			if err != nil {
+				return err
+			}
+			proof, err := c.WaitForProve(cmd.Context(), sub.JobID, nil)
 			if err != nil {
 				return err
 			}

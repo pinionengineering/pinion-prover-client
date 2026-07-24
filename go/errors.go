@@ -51,17 +51,6 @@ func (e *TagFailedError) Error() string {
 	return fmt.Sprintf("tag job %s failed: %s", e.JobID, e.Reason)
 }
 
-// TagTimeoutError is returned by Tag when the job hasn't reached a terminal
-// state within the configured timeout.
-type TagTimeoutError struct {
-	JobID      string
-	LastStatus string
-}
-
-func (e *TagTimeoutError) Error() string {
-	return fmt.Sprintf("tag job %s timed out (last status: %s)", e.JobID, e.LastStatus)
-}
-
 // ProveFailedError is returned by Prove when the async proof job reaches
 // the "prove-failed" state.
 type ProveFailedError struct {
@@ -73,17 +62,4 @@ type ProveFailedError struct {
 
 func (e *ProveFailedError) Error() string {
 	return fmt.Sprintf("prove job %s failed: %s", e.JobID, e.Reason)
-}
-
-// ProveTimeoutError is returned by Prove when the job hasn't reached a
-// terminal state within the configured timeout.
-type ProveTimeoutError struct {
-	JobID      string
-	LastStatus string
-	Challenge  []byte
-	Roots      []string
-}
-
-func (e *ProveTimeoutError) Error() string {
-	return fmt.Sprintf("prove job %s timed out (last status: %s)", e.JobID, e.LastStatus)
 }

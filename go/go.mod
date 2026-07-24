@@ -5,6 +5,7 @@ go 1.26.4
 require (
 	github.com/ipfs/go-cid v0.6.1
 	github.com/joho/godotenv v1.5.1
+	github.com/multiformats/go-multihash v0.2.3
 	github.com/pinionengineering/ipfs-storage-proofs v0.0.0-20260723224208-0e7c0836275b
 	github.com/pinionengineering/storage-proofs v0.0.0-20260723224100-8788b65ebed6
 	github.com/spf13/cobra v1.10.2
@@ -26,7 +27,6 @@ require (
 	github.com/multiformats/go-base32 v0.1.0 // indirect
 	github.com/multiformats/go-base36 v0.2.0 // indirect
 	github.com/multiformats/go-multibase v0.3.0 // indirect
-	github.com/multiformats/go-multihash v0.2.3 // indirect
 	github.com/multiformats/go-varint v0.1.0 // indirect
 	github.com/pelletier/go-toml/v2 v2.2.4 // indirect
 	github.com/sagikazarmark/locafero v0.11.0 // indirect

@@ -5,8 +5,10 @@
 // built on), exactly as pinion-prover's own testclient does. What this
 // package adds on top is the same ergonomic layer the JS client
 // (@pinionengineering/prover-client) has: a Client with typed methods,
-// automatic polling of the async tag/prove jobs, typed errors, and an
-// Audit() convenience that runs challenge → prove → verify in one call.
+// submit/wait helpers for the async tag/prove jobs (Tag/WaitForTag,
+// Prove/WaitForProve, with no default deadline: the ctx you pass owns how
+// long to wait), typed errors, and an Audit() convenience that runs
+// challenge → prove → verify in one call.
 //
 // Route structure (baseURL = ".../prover"):
 //
@@ -113,46 +115,54 @@ func (c *Client) GetSetup(ctx context.Context, keyID string) (*SetupResponse, er
 	return &out, nil
 }
 
-// TagOptions configures Tag's job-status polling.
-type TagOptions struct {
+// Tag asks the server to walk the IPFS DAG for root, compute per-block
+// authentication tags, and store them under keyID. root must already be in
+// the "pinned" lifecycle state for the authenticated account.
+//
+// Tag is submit-only: it posts the job and returns immediately with a job
+// handle. Tagging itself happens asynchronously on the server; call
+// WaitForTag with the returned JobID to block until it reaches a terminal
+// state, then GetSetup to get the updated block ID list for the next audit
+// cycle.
+func (c *Client) Tag(ctx context.Context, root, keyID string) (*TagSubmission, error) {
+	var jobResp TagJobResponse
+	if err := c.post(ctx, "/api/v1/tag", TagRequest{Root: root, KeyID: keyID}, &jobResp); err != nil {
+		return nil, fmt.Errorf("tag %s: %w", root, err)
+	}
+	return &TagSubmission{JobID: jobResp.JobID, Root: root, KeyID: keyID}, nil
+}
+
+// WaitForTagOptions configures WaitForTag.
+type WaitForTagOptions struct {
 	// PollInterval between GET /tag/:job_id polls. Default 1s.
 	PollInterval time.Duration
-	// Timeout before giving up and returning TagTimeoutError. Default 10m.
-	Timeout time.Duration
 	// OnProgress, if set, is called after every status poll with the latest
 	// progress and raw status string.
 	OnProgress func(progress TagJobProgress, status string)
 }
 
-// Tag asks the server to walk the IPFS DAG for root, compute per-block
-// authentication tags, and store them under keyID. root must already be in
-// the "pinned" lifecycle state for the authenticated account.
+// WaitForTag polls GET /api/v1/tag/:job_id until the job reaches a terminal
+// state, returning the completed status (with the block ID list/count) once
+// "tag-done", or a *TagFailedError once "tag-failed".
 //
-// Tagging is asynchronous on the server: this posts the job, then polls GET
-// /api/v1/tag/:job_id until it reaches a terminal state, so Tag only returns
-// once tagging is actually done. Call GetSetup after Tag to get the updated
-// block ID list for the next audit cycle.
-func (c *Client) Tag(ctx context.Context, root, keyID string, opts *TagOptions) (*TagJobStatusResponse, error) {
+// There is no default deadline: WaitForTag waits as long as ctx allows,
+// since a DAG walk can legitimately take a long time and the server was
+// never designed to respect an arbitrary client-side ceiling. Pass a ctx
+// built with context.WithTimeout to bound the wait; a ctx deadline or
+// cancellation surfaces as ctx.Err() (check with errors.Is against
+// context.DeadlineExceeded/context.Canceled), not a special error type,
+// since the ctx already threaded through every call is the one thing that
+// should own "how long is too long".
+func (c *Client) WaitForTag(ctx context.Context, jobID string, opts *WaitForTagOptions) (*TagJobStatusResponse, error) {
 	if opts == nil {
-		opts = &TagOptions{}
+		opts = &WaitForTagOptions{}
 	}
 	pollInterval := opts.PollInterval
 	if pollInterval <= 0 {
 		pollInterval = time.Second
 	}
-	timeout := opts.Timeout
-	if timeout <= 0 {
-		timeout = 10 * time.Minute
-	}
-
-	var jobResp TagJobResponse
-	if err := c.post(ctx, "/api/v1/tag", TagRequest{Root: root, KeyID: keyID}, &jobResp); err != nil {
-		return nil, fmt.Errorf("tag %s: %w", root, err)
-	}
-
-	deadline := time.Now().Add(timeout)
 	for {
-		status, err := c.TagStatus(ctx, jobResp.JobID)
+		status, err := c.TagStatus(ctx, jobID)
 		if err != nil {
 			return nil, err
 		}
@@ -163,10 +173,7 @@ func (c *Client) Tag(ctx context.Context, root, keyID string, opts *TagOptions) 
 		case "tag-done":
 			return status, nil
 		case "tag-failed":
-			return nil, &TagFailedError{JobID: jobResp.JobID, Reason: status.Error}
-		}
-		if time.Now().After(deadline) {
-			return nil, &TagTimeoutError{JobID: jobResp.JobID, LastStatus: status.Status}
+			return nil, &TagFailedError{JobID: jobID, Reason: status.Error}
 		}
 		if err := sleepCtx(ctx, pollInterval); err != nil {
 			return nil, err
@@ -208,37 +215,15 @@ func (c *Client) Deregister(ctx context.Context, keyID, root string) error {
 // Audit phase
 // ---------------------------------------------------------------------------
 
-// ProveOptions configures Prove's job-status polling.
-type ProveOptions struct {
-	// PollInterval between GET /prove/:job_id polls. Default 500ms.
-	PollInterval time.Duration
-	// Timeout before giving up and returning ProveTimeoutError. Default 60s,
-	// much shorter than Tag's default, since a proof round is one bounded
-	// crypto operation over the sampled blocks, not a per-block DAG walk.
-	Timeout time.Duration
-}
-
 // Prove posts a challenge to POST /prove (unauthenticated: the server
-// resolves the account from keyID) and polls until the job reaches a
-// terminal state, returning the raw proof bytes. Most callers should use
-// Audit instead, which also cryptographically verifies the response.
+// resolves the account from keyID) and returns immediately with a job
+// handle. Most callers should use Audit instead, which also submits, waits,
+// and cryptographically verifies the response in one call.
 //
 // challengeID is an optional idempotency key; leave it empty for normal
 // audit rounds, each of which should be a fresh, independently random
 // challenge that must never be deduped against a previous one.
-func (c *Client) Prove(ctx context.Context, keyID string, roots []string, challenge []byte, challengeID string, opts *ProveOptions) ([]byte, error) {
-	if opts == nil {
-		opts = &ProveOptions{}
-	}
-	pollInterval := opts.PollInterval
-	if pollInterval <= 0 {
-		pollInterval = 500 * time.Millisecond
-	}
-	timeout := opts.Timeout
-	if timeout <= 0 {
-		timeout = 60 * time.Second
-	}
-
+func (c *Client) Prove(ctx context.Context, keyID string, roots []string, challenge []byte, challengeID string) (*ProveSubmission, error) {
 	body, err := json.Marshal(ProveRequest{KeyID: keyID, Roots: roots, Challenge: challenge, ChallengeID: challengeID})
 	if err != nil {
 		return nil, err
@@ -263,21 +248,54 @@ func (c *Client) Prove(ctx context.Context, keyID string, roots []string, challe
 	if err := json.Unmarshal(respBody, &jobResp); err != nil {
 		return nil, &MalformedResponseError{Status: resp.StatusCode, BodyPreview: preview(respBody), Cause: err}
 	}
+	return &ProveSubmission{JobID: jobResp.JobID, Challenge: challenge, Roots: roots}, nil
+}
 
-	deadline := time.Now().Add(timeout)
+// WaitForProveOptions configures WaitForProve.
+type WaitForProveOptions struct {
+	// PollInterval between GET /prove/:job_id polls. Default 500ms.
+	PollInterval time.Duration
+	// Challenge/Roots are echoed back on a *ProveFailedError so callers
+	// building a retry don't have to thread them separately. Optional.
+	Challenge []byte
+	Roots     []string
+	// OnStatus, if set, is called after every status poll with the raw
+	// status string. There's no per-block progress signal for proving
+	// (unlike tagging), just the coarse queued/running/done/failed status.
+	OnStatus func(status string)
+}
+
+// WaitForProve polls GET /prove/:job_id until the job reaches a terminal
+// state, returning the raw proof bytes once "prove-done", or a
+// *ProveFailedError once "prove-failed".
+//
+// There is no default deadline: WaitForProve waits as long as ctx allows,
+// since a proof round can legitimately take longer than any fixed ceiling
+// and the server was never designed to respect one. Pass a ctx built with
+// context.WithTimeout to bound the wait; a ctx deadline or cancellation
+// surfaces as ctx.Err() (check with errors.Is against
+// context.DeadlineExceeded/context.Canceled), not a special error type.
+func (c *Client) WaitForProve(ctx context.Context, jobID string, opts *WaitForProveOptions) ([]byte, error) {
+	if opts == nil {
+		opts = &WaitForProveOptions{}
+	}
+	pollInterval := opts.PollInterval
+	if pollInterval <= 0 {
+		pollInterval = 500 * time.Millisecond
+	}
 	for {
-		status, err := c.ProveStatus(ctx, jobResp.JobID)
+		status, err := c.ProveStatus(ctx, jobID)
 		if err != nil {
 			return nil, err
+		}
+		if opts.OnStatus != nil {
+			opts.OnStatus(status.Status)
 		}
 		switch status.Status {
 		case "prove-done":
 			return status.Proof, nil
 		case "prove-failed":
-			return nil, &ProveFailedError{JobID: jobResp.JobID, Reason: status.Error, Challenge: challenge, Roots: roots}
-		}
-		if time.Now().After(deadline) {
-			return nil, &ProveTimeoutError{JobID: jobResp.JobID, LastStatus: status.Status, Challenge: challenge, Roots: roots}
+			return nil, &ProveFailedError{JobID: jobID, Reason: status.Error, Challenge: opts.Challenge, Roots: opts.Roots}
 		}
 		if err := sleepCtx(ctx, pollInterval); err != nil {
 			return nil, err
@@ -301,6 +319,14 @@ type AuditOptions struct {
 	// ChallengeSize is how many blocks (super-blocks, for the chunked
 	// protocols) to sample across the selected roots combined. Default 20.
 	ChallengeSize int
+	// PollInterval between GET /prove/:job_id polls while waiting for the
+	// proof. Default 500ms.
+	PollInterval time.Duration
+	// OnStatus, if set, is called after every status poll with the raw
+	// status string, letting a caller show progress during a long-running
+	// round. There is no default deadline on the wait; bound it via ctx
+	// (context.WithTimeout) if desired.
+	OnStatus func(status string)
 }
 
 // AuditResult is the outcome of one Audit round.
@@ -355,7 +381,16 @@ func (c *Client) Audit(ctx context.Context, keyID string, setup *SetupResponse, 
 		return nil, fmt.Errorf("proverclient: generate challenge: %w", err)
 	}
 
-	proof, err := c.Prove(ctx, keyID, targetRoots, chal, "", nil)
+	submission, err := c.Prove(ctx, keyID, targetRoots, chal, "")
+	if err != nil {
+		return nil, err
+	}
+	proof, err := c.WaitForProve(ctx, submission.JobID, &WaitForProveOptions{
+		PollInterval: opts.PollInterval,
+		Challenge:    chal,
+		Roots:        targetRoots,
+		OnStatus:     opts.OnStatus,
+	})
 	if err != nil {
 		return nil, err
 	}

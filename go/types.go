@@ -76,6 +76,15 @@ type TagJobResponse struct {
 	JobID string `json:"job_id"`
 }
 
+// TagSubmission is returned by Client.Tag: the job has been created and
+// queued. Pass JobID to WaitForTag to block until it reaches a terminal
+// state.
+type TagSubmission struct {
+	JobID string
+	Root  string
+	KeyID string
+}
+
 // TagJobProgress reports how much of an in-flight tag job has completed.
 type TagJobProgress struct {
 	TotalBlocks     int `json:"total_blocks"`
@@ -133,6 +142,14 @@ type ProveRequest struct {
 // created and queued. Poll GET /prove/:job_id with this JobID for status.
 type ProveJobResponse struct {
 	JobID string `json:"job_id"`
+}
+
+// ProveSubmission is returned by Client.Prove: the job has been created and
+// queued. Pass JobID to WaitForProve to block until the proof is ready.
+type ProveSubmission struct {
+	JobID     string
+	Challenge []byte
+	Roots     []string
 }
 
 // ProveJobStatusResponse is returned by GET /prove/:job_id, unauthenticated
