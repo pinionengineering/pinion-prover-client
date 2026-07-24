@@ -54,7 +54,7 @@ export interface AuditOptions {
   roots?: string[];
   /**
    * Percentage of blocks to sample per round, 0–100.  Default 1.
-   * Repeated 1% rounds accumulate statistical certainty over time — each round
+   * Repeated 1% rounds accumulate statistical certainty over time. Each round
    * forces the server to prove possession of an independently random sample.
    * Use 100 for a one-shot full audit.
    *
@@ -66,12 +66,12 @@ export interface AuditOptions {
   pollIntervalMs?: number;
   /**
    * Optional cancellation of audit()'s wait phase. There is no default
-   * deadline — omit to wait as long as the proof takes. Pass
+   * deadline. Omit to wait as long as the proof takes. Pass
    * `AbortSignal.timeout(ms)` to restore a fixed ceiling.
    */
   signal?: AbortSignal;
   /** Called after every status poll with the raw status string
-   * ("prove-queued" | "prove-running") — for progress UI. There is no
+   * ("prove-queued" | "prove-running"), for progress UI. There is no
    * per-block progress signal for proving, unlike tag()'s onProgress. */
   onStatus?: (status: string) => void;
 }
@@ -81,7 +81,7 @@ export interface WaitForTagOptions {
   /** Milliseconds between GET /tag/:job_id polls. Default 1000. */
   pollIntervalMs?: number;
   /**
-   * Optional cancellation. There is no default deadline — omit to wait
+   * Optional cancellation. There is no default deadline, omit to wait
    * indefinitely. Pass `AbortSignal.timeout(ms)` to restore the old fixed
    * ceiling (waitForTag() throws TagTimeoutError when the signal fires
    * before the job reaches a terminal state).
@@ -92,8 +92,8 @@ export interface WaitForTagOptions {
    * status string ("tag-queued" | "tag-planning" | "tag-running" |
    * "tag-merging" | "tag-done" | "tag-failed"). The server populates
    * progress on every poll regardless of status, including "tag-queued"
-   * before any work has started (as {total_blocks: 0, completed_blocks: 0})
-   * — check `status` if you need to distinguish "not started yet" from
+   * before any work has started (as {total_blocks: 0, completed_blocks: 0}).
+   * Check `status` if you need to distinguish "not started yet" from
    * "actively running".
    */
   onProgress?: (progress: TagJobProgress, status: string) => void;
@@ -104,7 +104,7 @@ export interface WaitForProveOptions {
   /** Milliseconds between GET /prove/:job_id polls. Default 500. */
   pollIntervalMs?: number;
   /**
-   * Optional cancellation. There is no default deadline — omit to wait
+   * Optional cancellation. There is no default deadline, omit to wait
    * indefinitely. Pass `AbortSignal.timeout(ms)` to restore the old fixed
    * ceiling (waitForProve() throws ProveTimeoutError when the signal fires
    * before the job reaches a terminal state).
@@ -113,7 +113,7 @@ export interface WaitForProveOptions {
   /**
    * The challenge/roots this job was submitted with. Optional, but passing
    * them lets a thrown ProveFailedError/ProveTimeoutError carry enough to
-   * reconstruct a retry — pass what prove() gave you back.
+   * reconstruct a retry. Pass what prove() gave you back.
    */
   challenge?: string;
   roots?: string[];
@@ -145,7 +145,7 @@ export class PinionProverClient {
    *
    * The server generates a key pair and keeps the private scalar α.  The returned
    * `publicKey` is the public half: G1 points U[0..s-1] and G2 point V = α·G₂.
-   * Store these alongside `keyId` — they are all you need to verify proofs locally,
+   * Store these alongside `keyId`. They are all you need to verify proofs locally,
    * independent of the server returning the same material later.
    */
   async createKey(label?: string): Promise<CreateKeyResult> {
@@ -176,7 +176,7 @@ export class PinionProverClient {
   /**
    * Fetch the setup document for a key: public key material and, per
    * registered root, either the block ID list (non-chunked protocols) or the
-   * super-block count (chunked protocols: SW-Priv, SW-Pub) — parseSetupResponse
+   * super-block count (chunked protocols: SW-Priv, SW-Pub). parseSetupResponse
    * turns either into a uniform ParsedRoot.blockIds array.
    *
    * Call this once after tagging to obtain the ParsedSetup needed for auditing.
@@ -194,10 +194,10 @@ export class PinionProverClient {
    * authentication tags, and store them under keyId.
    *
    * The root must already be in the "pinned" lifecycle state for the
-   * authenticated account. Tagging runs asynchronously on the server — this
+   * authenticated account. Tagging runs asynchronously on the server. This
    * submits the job and returns immediately with a job handle. Poll
    * tagStatus(jobId) yourself, or await waitForTag(jobId, options) to wait
-   * for a terminal state (with no default deadline — pass `signal:
+   * for a terminal state (with no default deadline, pass `signal:
    * AbortSignal.timeout(ms)` if you want one). Call getSetup() after
    * tagging completes to get the updated block ID lists for the next audit
    * cycle.
@@ -219,7 +219,7 @@ export class PinionProverClient {
    * Wait for a tag job started by tag() to reach a terminal state, polling
    * tagStatus(jobId) on an interval.
    *
-   * There is no default deadline — this waits as long as the job takes
+   * There is no default deadline. This waits as long as the job takes
    * unless options.signal is given and fires first, in which case it
    * throws TagTimeoutError with the last-seen status. Throws TagFailedError
    * if the job reaches "tag-failed".
@@ -251,7 +251,7 @@ export class PinionProverClient {
   /**
    * List the caller's tag jobs, most recently created first.
    *
-   * Unlike tagStatus(), this doesn't require already knowing a job_id — use
+   * Unlike tagStatus(), this doesn't require already knowing a job_id. Use
    * it to discover in-flight tagging after a page reload or from a
    * different tab/device than the one that started it. Pass
    * `{ active: true }` to list only non-terminal jobs (queued/planning/
@@ -275,12 +275,12 @@ export class PinionProverClient {
   // ---------------------------------------------------------------------------
 
   /**
-   * POST /prove — unauthenticated, the server resolves the account from key_id.
+   * POST /prove: unauthenticated, the server resolves the account from key_id.
    *
    * Proving is asynchronous: this submits the challenge and returns
    * immediately with a job handle. Poll proveStatus(jobId) yourself, or
    * await waitForProve(jobId, options) to wait for a terminal state (with
-   * no default deadline — pass `signal: AbortSignal.timeout(ms)` if you
+   * no default deadline (pass `signal: AbortSignal.timeout(ms)` if you
    * want one). Most callers should use audit() instead, which submits,
    * waits, and cryptographically verifies the response in one call.
    *
@@ -293,7 +293,7 @@ export class PinionProverClient {
    *                    earlier attempt with an unclear outcome), passing the
    *                    same challengeId across those attempts makes the
    *                    server return the original job instead of starting a
-   *                    redundant one. Leave unset for normal audit rounds —
+   *                    redundant one. Leave unset for normal audit rounds:
    *                    each is a fresh, independently random challenge,
    *                    which should never be deduped against a previous one.
    *
@@ -331,7 +331,7 @@ export class PinionProverClient {
    * Wait for a proof job started by prove() to reach a terminal state,
    * polling proveStatus(jobId) on an interval. Returns the raw proof bytes.
    *
-   * There is no default deadline — this waits as long as the proof takes
+   * There is no default deadline. This waits as long as the proof takes
    * unless options.signal is given and fires first, in which case it
    * throws ProveTimeoutError with the last-seen status. Throws
    * ProveFailedError if the job reaches "prove-failed".
@@ -363,21 +363,21 @@ export class PinionProverClient {
    *
    * Builds a random challenge for the requested percentage of blocks, posts it
    * to POST /prove, and cryptographically verifies the response.  Pass the
-   * ParsedSetup obtained from getSetup() — audit() does not fetch it for you,
+   * ParsedSetup obtained from getSetup(). audit() does not fetch it for you,
    * keeping the setup and audit phases explicit.
    *
    * ```ts
-   * // Setup phase — done once (or after adding/removing roots):
+   * // Setup phase (done once, or after adding/removing roots):
    * const { keyId } = await client.createKey();
    * await client.tag(cid, keyId);
    * const setup = await client.getSetup(keyId);
    *
-   * // Audit phase — repeat on a schedule:
+   * // Audit phase (repeat on a schedule):
    * const result = await client.audit(keyId, setup);
    * const result = await client.audit(keyId, setup, { challengePct: 100 });
    * ```
    *
-   * Waits for the proof with no default deadline — pass `options.signal` if
+   * Waits for the proof with no default deadline. Pass `options.signal` if
    * you want to cancel or bound how long this waits (e.g.
    * `AbortSignal.timeout(60_000)` for the old fixed ceiling).
    *
@@ -484,7 +484,7 @@ export class PinionProverClient {
 
 /**
  * Parses resp's body as JSON, throwing MalformedResponseError (rather than
- * a raw, untyped SyntaxError) if it isn't well-formed — e.g. a proxy or
+ * a raw, untyped SyntaxError) if it isn't well-formed (e.g. a proxy or
  * load balancer returning an HTML error page with a 200 status, or a
  * response truncated mid-body. A non-2xx status is expected to have already
  * been handled by the caller before this is reached; this only guards
@@ -507,7 +507,7 @@ async function parseJsonBody<T>(resp: Response): Promise<T> {
  * Internal signal that a poll loop was cancelled via its caller-supplied
  * AbortSignal before the job reached a terminal state. waitForProve()/
  * waitForTag() catch this and rethrow as ProveTimeoutError/TagTimeoutError
- * carrying lastStatus — never thrown to the outside on its own.
+ * carrying lastStatus. Never thrown to the outside on its own.
  */
 class PollAbortedError extends Error {
   constructor(public readonly lastStatus: unknown) {
@@ -519,7 +519,7 @@ class PollAbortedError extends Error {
 /**
  * Polls fetchStatus() every pollIntervalMs until isTerminal(status) is
  * true, calling onTick(status) after every poll (terminal or not) so
- * callers can drive progress callbacks. Has NO built-in deadline — the
+ * callers can drive progress callbacks. Has NO built-in deadline: the
  * caller's polling budget is unlimited unless `signal` is given, in which
  * case an abort rejects with PollAbortedError(lastStatus) instead of
  * resolving.
@@ -576,7 +576,7 @@ export class ProverError extends Error {
 
 /**
  * Thrown when a response has a successful HTTP status but a body that
- * isn't valid JSON — this is what an infra problem often looks like from
+ * isn't valid JSON. This is what an infra problem often looks like from
  * the client's perspective (a proxy's HTML error page returned with a 200,
  * a response cut off mid-stream), as opposed to a clean non-2xx status
  * (which surfaces as ProverError instead). bodyPreview is truncated to 200
@@ -618,7 +618,7 @@ export class TagFailedError extends Error {
 
 /**
  * Thrown by waitForTag() when its `options.signal` fires before the job
- * reaches a terminal state. There is no default deadline anymore — this
+ * reaches a terminal state. There is no default deadline anymore. This
  * only happens if the caller opted into one (e.g. `signal:
  * AbortSignal.timeout(ms)`).
  */
@@ -637,7 +637,7 @@ export class ProveFailedError extends Error {
   constructor(
     public readonly jobId: string,
     public readonly reason: string,
-    /** The challenge this job was for — base64(JSON(WireChallenge)), decode with decodeChallenge(). Undefined if the caller didn't pass one to waitForProve(). */
+    /** The challenge this job was for: base64(JSON(WireChallenge)), decode with decodeChallenge(). Undefined if the caller didn't pass one to waitForProve(). */
     public readonly challenge: string | undefined,
     public readonly roots: string[] | undefined,
   ) {
@@ -648,7 +648,7 @@ export class ProveFailedError extends Error {
 
 /**
  * Thrown by waitForProve() when its `options.signal` fires before the job
- * reaches a terminal state. There is no default deadline anymore — this
+ * reaches a terminal state. There is no default deadline anymore. This
  * only happens if the caller opted into one (e.g. `signal:
  * AbortSignal.timeout(ms)`).
  */
@@ -656,7 +656,7 @@ export class ProveTimeoutError extends Error {
   constructor(
     public readonly jobId: string,
     public readonly lastStatus: string,
-    /** The challenge this job was for — base64(JSON(WireChallenge)), decode with decodeChallenge(). Undefined if the caller didn't pass one to waitForProve(). */
+    /** The challenge this job was for: base64(JSON(WireChallenge)), decode with decodeChallenge(). Undefined if the caller didn't pass one to waitForProve(). */
     public readonly challenge: string | undefined,
     public readonly roots: string[] | undefined,
   ) {
@@ -678,7 +678,7 @@ export class ProveTimeoutError extends Error {
  *     decoded to raw CID bytes (Uint8Array) via multiformats/cid.
  *   - chunked (SW-Priv/SW-Pub): roots[].block_count is a super-block count;
  *     ids are synthesized locally as superBlockId(rootBytes, i) for i in
- *     [0, block_count) — see superBlockId()'s doc comment in challenge.ts for
+ *     [0, block_count), see superBlockId()'s doc comment in challenge.ts for
  *     why no per-block manifest is needed for these protocols.
  */
 export function parseSetupResponse(raw: RawSetupResponse): ParsedSetup {

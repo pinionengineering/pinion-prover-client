@@ -3,12 +3,12 @@
  *
  * Regression coverage for the redesign: prove()/tag() must be submit-only
  * (never call the status endpoint themselves), and waitForProve()/
- * waitForTag() must have NO default deadline — the bug being fixed here is
+ * waitForTag() must have NO default deadline. The bug being fixed here is
  * a hardcoded 60s/10min ceiling that threw even when the job would have
  * succeeded given more time. A caller-supplied AbortSignal is the only way
  * to stop waiting early.
  *
- * Uses a hand-rolled global.fetch stub (no mocking library) — this repo has
+ * Uses a hand-rolled global.fetch stub (no mocking library). This repo has
  * no test framework, following verify.test.mjs's existing convention of a
  * plain script with a custom assert() that exits(1) on failure.
  *
@@ -81,7 +81,7 @@ function assert(condition, message) {
 }
 
 // ---------------------------------------------------------------------------
-// Test 1: prove() is submit-only — resolves right after POST /prove,
+// Test 1: prove() is submit-only, resolves right after POST /prove,
 // without ever calling GET /prove/:job_id. Direct regression test for
 // "submit and poll are no longer fused."
 // ---------------------------------------------------------------------------
@@ -200,11 +200,11 @@ await withMockFetch(
     );
   },
 );
-console.log('  Test 5 PASS: waitForProve() never times out on its own — no implicit deadline anywhere');
+console.log('  Test 5 PASS: waitForProve() never times out on its own, no implicit deadline anywhere');
 
 // ---------------------------------------------------------------------------
 // Test 6: waitForProve() with an AbortSignal that fires mid-poll rejects
-// promptly with ProveTimeoutError carrying the last-seen status — the only
+// promptly with ProveTimeoutError carrying the last-seen status. The only
 // way to stop waiting early now that there's no built-in ceiling.
 // ---------------------------------------------------------------------------
 await withMockFetch(
@@ -334,12 +334,12 @@ console.log('  Test 10 PASS: waitForTag() throws TagFailedError on tag-failed');
 
 // ---------------------------------------------------------------------------
 // Test 11: prove()+waitForProve()+verifyProofResult() against the real
-// cross-language test vector — genuine crypto coverage of the NEW submit/
+// cross-language test vector: genuine crypto coverage of the NEW submit/
 // wait plumbing (not just mocked statuses). This deliberately bypasses
 // audit(): audit() always builds a fresh, randomly-seeded challenge via
 // buildChallenge(), which would never match a precomputed vector's fixed
 // challenge/proof pair, even at 100% block coverage (the SW-Pub proof's
-// coefficients are seed-derived, not just which blocks were picked) — so a
+// coefficients are seed-derived, not just which blocks were picked), so a
 // real "does this proof verify" test has to go through the raw calls with
 // the vector's own vec.challenge, not through audit()'s wrapper.
 // ---------------------------------------------------------------------------
@@ -378,12 +378,12 @@ await withMockFetch(
 console.log('  Test 11 PASS: prove()+waitForProve() round-trip a real proof that verifies correctly');
 
 // ---------------------------------------------------------------------------
-// Test 12: audit() plumbing — confirms onStatus/pollIntervalMs actually
+// Test 12: audit() plumbing. Confirms onStatus/pollIntervalMs actually
 // reach the underlying poll (the exact bug being fixed: audit() used to
 // pass zero options through to prove()) and that a bad proof is reported
 // as verification failure, not a crash. Uses a malformed proof rather than
 // the real vector, since audit() always builds its own randomly-seeded
-// challenge internally — genuine crypto pass/fail coverage for the new
+// challenge internally. Genuine crypto pass/fail coverage for the new
 // plumbing lives in Test 11 instead.
 // ---------------------------------------------------------------------------
 await withMockFetch(

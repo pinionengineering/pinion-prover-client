@@ -71,15 +71,15 @@ export interface ProveSubmission {
 
 /**
  * Raw status response from GET /prove/:job_id. This endpoint is
- * unauthenticated, same as POST /prove — job_id is a fresh, unguessable
+ * unauthenticated, same as POST /prove. job_id is a fresh, unguessable
  * identifier (or, when the request carried a challenge_id, deterministic
  * from (key_id, challenge_id)), so possession of it is the only
  * authorization this route needs.
  *
  * `status` is one of "prove-queued" | "prove-running" | "prove-done" |
  * "prove-failed". `challenge_id` echoes the value from the original
- * request. `proof` is populated only once `status` is "prove-done" — the
- * same field ProveResponse used to return synchronously. `error` is
+ * request. `proof` is populated only once `status` is "prove-done" (the
+ * same field ProveResponse used to return synchronously). `error` is
  * populated only once `status` is "prove-failed".
  */
 export interface ProveJobStatusResponse {
@@ -94,15 +94,15 @@ export interface ProveJobStatusResponse {
  * is populated: block_ids for protocols addressed by real IPFS block CID
  * (Ateniese, Erway, BJO); block_count for protocols that virtualize each root
  * into uniform super-blocks (SW-Priv, SW-Pub). For the latter, no per-block
- * manifest is sent at all — challenge ids are `rootCID.Bytes() || BE64(localIndex)`
+ * manifest is sent at all. Challenge ids are `rootCID.Bytes() || BE64(localIndex)`
  * for localIndex in [0, block_count), constructible from `root` plus this one
  * integer. See superBlockId() in challenge.ts, an exact port of SuperBlockID()
  * in ipfs-storage-proofs/superblock.go.
  */
 export interface RawTaggedRoot {
   root: string;          // CID string (e.g. "bafybeig...")
-  block_ids?: string[];  // CID strings in TagList order — non-chunked protocols only
-  block_count?: number;  // super-block count — chunked protocols only (SW-Priv, SW-Pub)
+  block_ids?: string[];  // CID strings in TagList order, non-chunked protocols only
+  block_count?: number;  // super-block count, chunked protocols only (SW-Priv, SW-Pub)
 }
 
 /** Raw JSON from GET /api/v1/setup?key_id=<id>. */
@@ -118,7 +118,7 @@ export interface ParsedRoot {
    * Ids ready to feed directly to buildChallenge()/verifyProof(), in order.
    * For non-chunked protocols these are real per-block CID bytes; for chunked
    * protocols (see `chunked` below) these are synthesized super-block ids
-   * (superBlockId(rootBytes, i) for i in [0, block_count)) — opaque either way
+   * (superBlockId(rootBytes, i) for i in [0, block_count)), opaque either way
    * to buildChallenge()/verifyProof(), which only need byte-identity, not
    * meaning.
    */
@@ -127,7 +127,7 @@ export interface ParsedRoot {
    * True if `blockIds` are synthesized super-block ids (chunked protocol:
    * SW-Priv, SW-Pub) rather than real per-block CIDs. Callers that need to
    * re-derive or re-export ids (e.g. writing an external client-state file)
-   * must branch on this — synthesized ids are not valid CIDs and must be
+   * must branch on this: synthesized ids are not valid CIDs and must be
    * reconstructed from `root` + a block count, never decoded as one.
    */
   chunked: boolean;
@@ -145,7 +145,7 @@ export interface ChallengeKeyInfo {
   key_id: string;
   protocol: string;
   created_at: string; // RFC3339
-  /** Human-readable name, if one was set. Empty for unnamed keys — a UUID
+  /** Human-readable name, if one was set. Empty for unnamed keys (a UUID
    * alone isn't usable in a UI once an account has more than one or two
    * keys, so callers should fall back to something derived from
    * created_at/key_id for display rather than assume this is always set. */
@@ -169,10 +169,10 @@ export interface UpdateKeyLabelRequest {
 }
 
 /**
- * Result of createKey() — the key ID plus the decoded public key material.
+ * Result of createKey(): the key ID plus the decoded public key material.
  *
  * `publicKey` contains the G1/G2 points needed to verify proofs locally.
- * Unlike a symmetric secret, this is the *public* half of the key pair — the
+ * Unlike a symmetric secret, this is the *public* half of the key pair. The
  * private half (α) never leaves the server.  You can safely store publicKey
  * alongside keyId so that future audits can verify proofs without trusting the
  * server to return the same key material each time.
@@ -185,17 +185,17 @@ export interface CreateKeyResult {
 
 /**
  * Raw tag response from POST /api/v1/tag. Exactly one of block_ids/block_count
- * is populated — see RawTaggedRoot's doc comment for which protocols use which.
+ * is populated. See RawTaggedRoot's doc comment for which protocols use which.
  *
  * For non-chunked protocols, `block_ids` is the ordered list of CID strings
  * for every block in the DAG; this same list is returned by getSetup() per
- * root and is what the client uses to select which blocks to challenge — the
+ * root and is what the client uses to select which blocks to challenge. The
  * server never picks them. For chunked protocols (SW-Priv, SW-Pub),
- * `block_count` is the super-block count instead — no manifest needed.
+ * `block_count` is the super-block count instead, no manifest needed.
  */
 export interface TagResponse {
-  block_ids?: string[]; // CID strings in TagList order — non-chunked protocols only
-  block_count?: number; // super-block count — chunked protocols only
+  block_ids?: string[]; // CID strings in TagList order, non-chunked protocols only
+  block_count?: number; // super-block count, chunked protocols only
 }
 
 /** Returned by POST /api/v1/tag: the tag job has been created and queued. */
@@ -226,7 +226,7 @@ export interface TagJobProgress {
  * `status` is one of the tagstate.Lifecycle string values from pinion-prover:
  * "tag-queued" | "tag-planning" | "tag-running" | "tag-merging" | "tag-done" |
  * "tag-failed". `block_ids`/`block_count` are populated only once `status` is
- * "tag-done" — the same fields TagResponse used to return synchronously.
+ * "tag-done" (the same fields TagResponse used to return synchronously).
  * `error` is populated only once `status` is "tag-failed".
  */
 export interface TagJobStatusResponse {
@@ -238,7 +238,7 @@ export interface TagJobStatusResponse {
 }
 
 /**
- * One entry from GET /api/v1/tag — a summary of a tag job for listing,
+ * One entry from GET /api/v1/tag: a summary of a tag job for listing,
  * without the terminal block_ids/block_count/error payload
  * TagJobStatusResponse carries.
  */
@@ -264,15 +264,15 @@ export interface TagJobListResponse {
  * cryptographic failure from one that couldn't even be evaluated:
  *
  *   - { verified: false, reason: 'pairing-mismatch' } means the pairing
- *     equation was evaluated and did not hold — the server either does not
+ *     equation was evaluated and did not hold. The server either does not
  *     hold the data or returned a deliberately bad proof. This is the only
  *     case that should ever be reported to a user as evidence of possible
  *     data loss.
  *   - { verified: false, reason: 'malformed-input', cause } means the
- *     equation was never evaluated at all — proofBytes wasn't valid
+ *     equation was never evaluated at all. proofBytes wasn't valid
  *     WireProof JSON, a curve point failed to decode, etc. This is what an
  *     infra error looks like from here: a 5xx with an HTML body, a proxy
- *     timeout page, a truncated response — none of which say anything about
+ *     timeout page, a truncated response, none of which say anything about
  *     whether the server actually holds the data.
  *
  * verifyProof() collapses both false cases into a plain `false`, which is
@@ -288,7 +288,7 @@ export interface AuditResult {
   /** true only if the pairing check e(σ,G₂) == e(A,v) passed. */
   pass: boolean;
   /**
-   * The richer verification outcome pass was derived from — check this to
+   * The richer verification outcome pass was derived from. Check this to
    * distinguish a real cryptographic failure (reason: 'pairing-mismatch')
    * from one that couldn't be evaluated at all (reason: 'malformed-input').
    * Only the former should ever be reported to a user as evidence of
@@ -299,6 +299,6 @@ export interface AuditResult {
   blocksChecked: number;
   keyId: string;
   roots: string[];
-  /** base64(JSON(WireChallenge)) used for this round — same bytes POST /prove sent. Decode with decodeChallenge(). */
+  /** base64(JSON(WireChallenge)) used for this round, same bytes POST /prove sent. Decode with decodeChallenge(). */
   challenge: string;
 }

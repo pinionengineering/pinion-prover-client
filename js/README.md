@@ -37,15 +37,15 @@ Requires Node.js ≥ 18. Works in modern browsers with native `crypto.getRandomV
 immediately (`{ jobId, ... }`) instead of blocking until the job finishes.
 Await the new `waitForTag(jobId, options?)` / `waitForProve(jobId, options?)`
 to wait for a terminal state, or poll `tagStatus(jobId)`/`proveStatus(jobId)`
-yourself. There is **no default deadline anymore** — the old hardcoded 60s
+yourself. There is **no default deadline anymore**: the old hardcoded 60s
 (`prove`)/10min (`tag`) timeouts are gone, since a proof or tag job can
 legitimately take longer and the server was never designed to respect an
 arbitrary client-side ceiling. If you want the old ceiling back, it's a
 strict superset away: pass `signal: AbortSignal.timeout(ms)` to
 `waitForProve()`/`waitForTag()`/`audit()`.
 
-`audit(keyId, setup)` is unchanged in shape — still one call that submits,
-waits, and verifies — but now also accepts `pollIntervalMs`/`signal`/
+`audit(keyId, setup)` is unchanged in shape (still one call that submits,
+waits, and verifies) but now also accepts `pollIntervalMs`/`signal`/
 `onStatus` so you can build progress UI or cancel a long-running round; see
 its section below.
 
@@ -65,7 +65,7 @@ The protocol has two distinct phases:
      independently of the server later.
 
 2. Call `tag(cid, keyId)` for each pinned CID, then `waitForTag(jobId)`.
-   Tagging is asynchronous — `tag()` submits the job and returns a job
+   Tagging is asynchronous. `tag()` submits the job and returns a job
    handle immediately; the server walks the IPFS DAG, computes per-block
    authentication tags, and stores them in the background. `waitForTag()`
    polls until it's done and returns the **block IDs** for that root: the
@@ -216,7 +216,7 @@ const { jobId } = await client.tag(cid, keyId);
 Instructs the server to walk the IPFS DAG for `root`, compute per-block
 authentication tags, and store them under `keyId`. The CID must be in the
 `"pinned"` lifecycle state for the authenticated account. Submits the job
-and returns immediately — this does not wait for tagging to finish.
+and returns immediately. This does not wait for tagging to finish.
 
 #### `client.waitForTag(jobId, options?)` → `TagResponse`
 
@@ -232,7 +232,7 @@ const { block_ids, block_count } = await client.waitForTag(jobId, {
 ```
 
 Polls `tagStatus(jobId)` until the job reaches a terminal state. **No
-default deadline** — waits as long as tagging takes unless `options.signal`
+default deadline**: waits as long as tagging takes unless `options.signal`
 is given and fires first, in which case it throws `TagTimeoutError`. Throws
 `TagFailedError` if the job reaches `"tag-failed"`.
 
@@ -246,7 +246,7 @@ combined list/count across all roots.
 | `WaitForTagOptions` field | Type | Default | Description |
 |-------|------|---------|-------------|
 | `pollIntervalMs` | `number` | `1000` | Milliseconds between status polls. |
-| `signal` | `AbortSignal` | none | Optional cancellation — no default deadline. |
+| `signal` | `AbortSignal` | none | Optional cancellation, no default deadline. |
 | `onProgress` | `(progress, status) => void` | none | Called after every poll with `{total_blocks, completed_blocks}` and the raw status string. |
 
 #### `client.getSetup(keyId)` → `ParsedSetup`
@@ -318,8 +318,8 @@ const result = await client.audit(keyId, setup, {
 | `roots` | `string[]` | all roots | Subset of registered CIDs to challenge. |
 | `challengePct` | `number` | `1` | Percentage of blocks to sample (0–100). |
 | `pollIntervalMs` | `number` | `500` | Milliseconds between status polls during the wait phase. |
-| `signal` | `AbortSignal` | none | Optional cancellation — no default deadline, waits as long as the proof takes unless this fires. Pass `AbortSignal.timeout(ms)` for a fixed ceiling. |
-| `onStatus` | `(status: string) => void` | none | Called after every poll with the raw status string — proving has no per-block progress signal, unlike tagging. |
+| `signal` | `AbortSignal` | none | Optional cancellation, no default deadline, waits as long as the proof takes unless this fires. Pass `AbortSignal.timeout(ms)` for a fixed ceiling. |
+| `onStatus` | `(status: string) => void` | none | Called after every poll with the raw status string; proving has no per-block progress signal, unlike tagging. |
 
 Throws `PinNotActiveError` if any root is no longer in the `"pinned"` state.
 Throws `ProverError` on HTTP errors from the server. Throws
@@ -352,19 +352,19 @@ const { jobId } = await client.prove(keyId, roots, challenge);
 ```
 
 Posts the challenge to `POST /prove` and returns immediately with a job
-handle — this does not wait for the proof to be computed.
+handle. This does not wait for the proof to be computed.
 
 ##### `client.waitForProve(jobId, options?)` → `Uint8Array`
 
 ```typescript
 const proofBytes = await client.waitForProve(jobId, {
   challenge, roots, // optional, but lets a thrown error carry enough to retry
-  signal: AbortSignal.timeout(60_000), // optional — no default deadline otherwise
+  signal: AbortSignal.timeout(60_000), // optional, no default deadline otherwise
 });
 ```
 
 Polls `proveStatus(jobId)` until the job reaches a terminal state and
-returns the raw proof bytes. **No default deadline** — waits as long as the
+returns the raw proof bytes. **No default deadline**: waits as long as the
 proof takes unless `options.signal` fires first, in which case it throws
 `ProveTimeoutError`. Throws `ProveFailedError` if the job reaches
 `"prove-failed"`.

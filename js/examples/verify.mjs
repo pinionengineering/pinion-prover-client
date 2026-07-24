@@ -1,10 +1,10 @@
 #!/usr/bin/env node
 /**
- * verify.mjs — end-to-end storage verification with @pinion/prover-client
+ * verify.mjs: end-to-end storage verification with @pinion/prover-client
  *
  * Proves that one or more pinned CIDs are cryptographically held by a Pinion
  * prover server.  "Pass" means the server solved a BN254 pairing challenge that
- * is only solvable by a party who actually has the block data — not just HTTP 200.
+ * is only solvable by a party who actually has the block data, not just HTTP 200.
  *
  * Prerequisites:
  *   - A running pinion-prover server          → PROVER_URL
@@ -63,7 +63,7 @@ async function main() {
   // ── Setup phase ────────────────────────────────────────────────────────────
 
   // 1. Find an existing sw-pub key or create one.
-  //    A single key can cover many CIDs — you don't need a new key per file.
+  //    A single key can cover many CIDs, you don't need a new key per file.
   const keys  = await client.listKeys();
   const swPub = keys.find(k => k.protocol === 'sw-pub');
 
@@ -97,7 +97,7 @@ async function main() {
 
   // 3. Fetch (or refresh) the setup document.
   //    We re-fetch after tagging so the setup includes any newly-tagged roots.
-  //    The setup contains the public key and the block ID lists for all roots —
+  //    The setup contains the public key and the block ID lists for all roots,
   //    both client and server use the same block IDs when processing a challenge.
   const freshSetup = toTag.length > 0 ? await client.getSetup(keyId) : setup;
   console.log(`[setup] ${freshSetup.totalBlocks} total block(s) across ${freshSetup.roots.length} root(s)`);
