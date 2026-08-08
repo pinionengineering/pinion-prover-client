@@ -156,6 +156,8 @@ export class PinionProverClient {
     return {
       keyId: raw.key_id,
       publicKey: parseClientSetup(raw.client_setup),
+      publicKeyRaw: base64ToBytes(raw.client_setup),
+      publicKeySig: raw.client_setup_sig ? base64ToBytes(raw.client_setup_sig) : undefined,
       label: raw.label,
     };
   }
@@ -411,7 +413,11 @@ export class PinionProverClient {
     });
 
     const verification = verifyProofResult({
+      keyId,
       clientSetup: setup.clientSetup,
+      clientSetupRaw: setup.clientSetupRaw,
+      clientSetupSig: setup.clientSetupSig,
+      rootEntries: rootEntries.map((r) => ({ root: r.root, blockCount: r.blockCount, blockCountSig: r.blockCountSig })),
       blockIds: allBlockIds,
       challenge,
       proofBytes,
@@ -683,12 +689,20 @@ export class ProveTimeoutError extends Error {
  */
 export function parseSetupResponse(raw: RawSetupResponse): ParsedSetup {
   const clientSetup: WireClientSetup = parseClientSetup(raw.client_setup);
+  const clientSetupRaw = base64ToBytes(raw.client_setup);
+  const clientSetupSig = raw.client_setup_sig ? base64ToBytes(raw.client_setup_sig) : undefined;
 
   const roots: ParsedRoot[] = raw.roots.map((r) => {
     if (r.block_count !== undefined) {
       const rootBytes = CID.parse(r.root).bytes;
       const blockIds = Array.from({ length: r.block_count }, (_, i) => superBlockId(rootBytes, i));
-      return { root: r.root, blockIds, chunked: true };
+      return {
+        root: r.root,
+        blockIds,
+        chunked: true,
+        blockCount: r.block_count,
+        blockCountSig: r.block_count_sig ? base64ToBytes(r.block_count_sig) : undefined,
+      };
     }
     return {
       root: r.root,
@@ -699,5 +713,5 @@ export function parseSetupResponse(raw: RawSetupResponse): ParsedSetup {
 
   const totalBlocks = roots.reduce((s, r) => s + r.blockIds.length, 0);
 
-  return { clientSetup, roots, totalBlocks };
+  return { clientSetup, clientSetupRaw, clientSetupSig, roots, totalBlocks };
 }

@@ -37,14 +37,40 @@ import {
   type G1Point,
 } from './bn254.js';
 import { base64ToBytes, blockHashG1, deriveIndicesAndCoeffs } from './challenge.js';
+import { verifyClientSetupSig, verifyBlockCountSig } from './trustkey.js';
 import type { WireClientSetup, WireChallenge, WireProof, ProofVerificationResult } from './types.js';
 
+/** One root's authenticity inputs, checked before any pairing math runs. */
+export interface VerifyRootEntry {
+  root: string;
+  /** Only present for chunked-protocol roots (SW-Priv, SW-Pub). */
+  blockCount?: number;
+  /** Only present for chunked-protocol roots; see ParsedRoot.blockCountSig. */
+  blockCountSig?: Uint8Array;
+}
+
 export interface VerifyParams {
+  /** The key ID this proof was audited under -- both signatures below are bound to it. */
+  keyId: string;
   /**
    * The parsed WireClientSetup from the client_setup blob.
    * Obtain via parseClientSetup() or directly from ParsedSetup.clientSetup.
    */
   clientSetup: WireClientSetup;
+  /**
+   * Raw base64-decoded client_setup bytes -- see ParsedSetup.clientSetupRaw
+   * for why this must be kept alongside the parsed clientSetup.
+   */
+  clientSetupRaw: Uint8Array;
+  /** Authenticates (keyId, clientSetupRaw); see ParsedSetup.clientSetupSig. */
+  clientSetupSig?: Uint8Array;
+  /**
+   * Every root contributing to blockIds, in the same order, for the
+   * per-root BlockCount authenticity check. Roots without blockCount/
+   * blockCountSig (non-chunked protocols) are skipped, not failed -- see
+   * ParsedRoot's doc comment.
+   */
+  rootEntries: VerifyRootEntry[];
   /**
    * Block IDs (CID.Bytes()) in TagList order, concatenated across all challenged
    * roots in the same order as the roots array in the ProveRequest.
@@ -64,6 +90,28 @@ export interface VerifyParams {
 }
 
 /**
+ * Checks clientSetup and every chunked root's blockCount against
+ * pinion-prover's signing key before any pairing math runs. Returns a
+ * detail string describing the first failure, or null if everything
+ * checked out. Deliberately fails on a missing signature exactly like a
+ * wrong one: an attacker able to tamper with clientSetup/blockCount in
+ * storage could just as easily blank out the accompanying signature field,
+ * so "no signature" must not be treated as "skip the check."
+ */
+function checkSetupAuthenticity(params: VerifyParams): string | null {
+  if (!verifyClientSetupSig(params.keyId, params.clientSetupRaw, params.clientSetupSig ?? new Uint8Array(0))) {
+    return `ClientSetup failed authenticity check for key ${params.keyId}`;
+  }
+  for (const r of params.rootEntries) {
+    if (r.blockCount === undefined) continue; // non-chunked: no BlockCount/BlockCountSig involved
+    if (!verifyBlockCountSig(params.keyId, r.root, r.blockCount, r.blockCountSig ?? new Uint8Array(0))) {
+      return `BlockCount failed authenticity check for key ${params.keyId} root ${r.root}`;
+    }
+  }
+  return null;
+}
+
+/**
  * Cryptographically verify a storage proof returned by pinion-prover,
  * distinguishing a real pairing-equation failure from one that couldn't be
  * evaluated at all (malformed/truncated response, wrong shape, etc.) —
@@ -74,6 +122,11 @@ export interface VerifyParams {
  * doesn't guarantee proofBytes is well-formed enough to evaluate.
  */
 export function verifyProofResult(params: VerifyParams): ProofVerificationResult {
+  const authFailure = checkSetupAuthenticity(params);
+  if (authFailure !== null) {
+    return { verified: false, reason: 'untrusted-setup', detail: authFailure };
+  }
+
   let result: boolean;
   try {
     result = _verifyProof(params);

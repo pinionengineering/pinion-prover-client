@@ -36,6 +36,16 @@ const {
 
 const BASE_URL = 'https://test.invalid/prover';
 
+// Genuine Ed25519 signature over frame("pinion-chalkey-v1", "test-key",
+// <testdata/vectors.json's raw client_setup bytes>), computed once against
+// trustkey.ts's hardcoded placeholder public key -- see verify.test.mjs's
+// identical constant for how it was generated and why it's pasted here
+// rather than re-signed in JS. Every test below that reaches
+// verifyProofResult's authenticity gate uses this key ID and signature.
+const TEST_KEY_ID = 'test-key';
+const TEST_CLIENT_SETUP_SIG_B64 =
+  'nuQqBVQU9N6shvQ/qv/qplgYNERK4m0vczeC4wvp9hLWS/lbWAzFlOpIEu8J6unEUCF1YTRfX48mFAwvmuQ5AA==';
+
 // ---------------------------------------------------------------------------
 // fetch stub
 // ---------------------------------------------------------------------------
@@ -367,7 +377,11 @@ await withMockFetch(
     });
     assert(calls.length === 3, `Test 11 FAILED: expected 1 submit + 2 polls = 3 calls, got ${calls.length}`);
     const verification = verifyProofResult({
+      keyId: TEST_KEY_ID,
       clientSetup: parseClientSetup(vec.client_setup),
+      clientSetupRaw: base64ToBytes(vec.client_setup),
+      clientSetupSig: base64ToBytes(TEST_CLIENT_SETUP_SIG_B64),
+      rootEntries: [],
       blockIds,
       challenge: vec.challenge,
       proofBytes,
@@ -405,11 +419,13 @@ await withMockFetch(
     const clientSetup = parseClientSetup(vec.client_setup);
     const setup = {
       clientSetup,
+      clientSetupRaw: base64ToBytes(vec.client_setup),
+      clientSetupSig: base64ToBytes(TEST_CLIENT_SETUP_SIG_B64),
       roots: [{ root: 'bafyTestRoot', blockIds: vec.block_ids.map(base64ToBytes), chunked: false }],
       totalBlocks: vec.block_ids.length,
     };
     const statuses = [];
-    const result = await client.audit('key-audit', setup, {
+    const result = await client.audit(TEST_KEY_ID, setup, {
       challengePct: 100,
       pollIntervalMs: 5,
       onStatus: (s) => statuses.push(s),

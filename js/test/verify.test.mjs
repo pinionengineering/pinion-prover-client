@@ -24,6 +24,31 @@ const { verifyProof, verifyProofResult, parseClientSetup, base64ToBytes, buildCh
   await import(path.join(root, 'dist/index.js'));
 
 // ---------------------------------------------------------------------------
+// Auth fields every VerifyParams object below needs, now that
+// verifyProofResult gates on ClientSetup/BlockCount authenticity (see
+// trustkey.ts) before running any pairing math.
+//
+// TEST_CLIENT_SETUP_SIG_B64 is a genuine Ed25519 signature over
+// frame("pinion-chalkey-v1", "test-key", <this vector's raw client_setup
+// bytes>), computed once with the private half of trustkey.ts's hardcoded
+// placeholder public key and pasted here as a fixed value -- deliberately
+// not re-derived in JS at test time, since transcribing key material by
+// hand between languages is exactly the kind of thing that's easy to get
+// subtly wrong (an off-by-one byte still "looks right" and fails silently
+// as a verification mismatch). If the test vector or the placeholder key
+// ever changes, this must be regenerated the same way: sign with the
+// matching private key against the exact frame() bytes, not by editing this
+// string directly.
+// ---------------------------------------------------------------------------
+const TEST_KEY_ID = 'test-key';
+const TEST_CLIENT_SETUP_SIG_B64 =
+  'nuQqBVQU9N6shvQ/qv/qplgYNERK4m0vczeC4wvp9hLWS/lbWAzFlOpIEu8J6unEUCF1YTRfX48mFAwvmuQ5AA==';
+// This vector's roots use raw block_ids, not block_count, so there is no
+// BlockCount to authenticate here -- see checkSetupAuthenticity's
+// "non-chunked: skip" branch in verify.ts.
+const rootEntries = [];
+
+// ---------------------------------------------------------------------------
 // Load test vectors
 // ---------------------------------------------------------------------------
 const vecPath = path.resolve(root, '..', 'testdata/vectors.json');
@@ -41,14 +66,21 @@ console.log(`  block_ids : ${vec.block_ids.length} blocks`);
 //   vec.proof         string  base64(wireProof JSON bytes)
 // ---------------------------------------------------------------------------
 const clientSetup = parseClientSetup(vec.client_setup);
+const clientSetupRaw = base64ToBytes(vec.client_setup);
+const clientSetupSig = base64ToBytes(TEST_CLIENT_SETUP_SIG_B64);
 const blockIds = vec.block_ids.map(base64ToBytes);
 const challenge = vec.challenge;       // pass as-is to verifyProof
 const proofBytes = base64ToBytes(vec.proof);
 
+// Every VerifyParams object below needs these four fields; keeping them in
+// one place means a future auth-scheme change only needs updating here, not
+// at every call site.
+const auth = { keyId: TEST_KEY_ID, clientSetupRaw, clientSetupSig, rootEntries };
+
 // ---------------------------------------------------------------------------
 // Test 1: valid proof must pass
 // ---------------------------------------------------------------------------
-let passed = verifyProof({ clientSetup, blockIds, challenge, proofBytes });
+let passed = verifyProof({ ...auth, clientSetup, blockIds, challenge, proofBytes });
 assert(passed === true, 'Test 1 FAILED: verifyProof should return true for a valid proof');
 console.log('  Test 1 PASS: valid proof accepted');
 
@@ -68,6 +100,7 @@ const tamperedProofJson = JSON.stringify({
 });
 const tamperedProofBytes = new TextEncoder().encode(tamperedProofJson);
 const tamperedPassed = verifyProof({
+  ...auth,
   clientSetup,
   blockIds,
   challenge,
@@ -85,6 +118,7 @@ console.log('  Test 2 PASS: tampered sigma rejected');
 // ---------------------------------------------------------------------------
 const wrongIds = blockIds.map((id) => new Uint8Array(id.length)); // all zeros
 const wrongIdsPassed = verifyProof({
+  ...auth,
   clientSetup,
   blockIds: wrongIds,
   challenge,
@@ -111,7 +145,7 @@ const fakeVBytes = flipByte(realVBytes, 35);
 const badKeySetup = { ...clientSetup, v: toBase64(fakeVBytes) };
 let wrongKeyPassed;
 try {
-  wrongKeyPassed = verifyProof({ clientSetup: badKeySetup, blockIds, challenge, proofBytes });
+  wrongKeyPassed = verifyProof({ ...auth, clientSetup: badKeySetup, blockIds, challenge, proofBytes });
 } catch {
   wrongKeyPassed = false;
 }
@@ -127,6 +161,7 @@ console.log('  Test 4 PASS: wrong public key rejected');
 // ---------------------------------------------------------------------------
 const garbageProofBytes = new TextEncoder().encode('<html>502 Bad Gateway</html>');
 const malformedResult = verifyProofResult({
+  ...auth,
   clientSetup,
   blockIds,
   challenge,
@@ -137,7 +172,7 @@ assert(
   'Test 5a FAILED: verifyProofResult should report malformed-input for an unparseable body',
 );
 assert(
-  verifyProof({ clientSetup, blockIds, challenge, proofBytes: garbageProofBytes }) === false,
+  verifyProof({ ...auth, clientSetup, blockIds, challenge, proofBytes: garbageProofBytes }) === false,
   'Test 5a FAILED: verifyProof should still return false for the same input (back-compat)',
 );
 console.log('  Test 5a PASS: malformed/unparseable proof body reported as malformed-input, not pairing-mismatch');
@@ -156,6 +191,7 @@ const scalarTamperedProofBytes = new TextEncoder().encode(
   JSON.stringify({ sigma: wireProof.sigma, mu: swappedMu }),
 );
 const mismatchResult = verifyProofResult({
+  ...auth,
   clientSetup,
   blockIds,
   challenge,
@@ -167,7 +203,7 @@ assert(
 );
 console.log('  Test 5b PASS: well-formed but cryptographically wrong proof reported as pairing-mismatch');
 
-const validResult = verifyProofResult({ clientSetup, blockIds, challenge, proofBytes });
+const validResult = verifyProofResult({ ...auth, clientSetup, blockIds, challenge, proofBytes });
 assert(validResult.verified === true, 'Test 5c FAILED: verifyProofResult should report verified:true for a valid proof');
 console.log('  Test 5c PASS: valid proof reported as verified');
 
@@ -181,6 +217,72 @@ assert(decoded.c === 5, 'Test 6 FAILED: c should round-trip as 5');
 assert(decoded.n === 20, 'Test 6 FAILED: n should round-trip as 20');
 assert(typeof decoded.seed === 'string' && decoded.seed.length > 0, 'Test 6 FAILED: seed should be a non-empty string');
 console.log('  Test 6 PASS: decodeChallenge(buildChallenge(...)) round-trips suite_id/c/n/seed');
+
+// ---------------------------------------------------------------------------
+// Test 7: setup authenticity gate. These are the actual security-relevant
+// checks -- not just that a genuine signature passes (already exercised by
+// every test above, all of which use `auth` with a real signature), but
+// that a tampered or missing one is rejected with 'untrusted-setup' before
+// the pairing math ever runs, and that the failure is reported distinctly
+// from a genuine cryptographic mismatch.
+// ---------------------------------------------------------------------------
+const tamperedSig = new Uint8Array(clientSetupSig);
+tamperedSig[0] ^= 0xFF;
+const tamperedSigResult = verifyProofResult({
+  ...auth,
+  clientSetupSig: tamperedSig,
+  clientSetup,
+  blockIds,
+  challenge,
+  proofBytes,
+});
+assert(
+  tamperedSigResult.verified === false && tamperedSigResult.reason === 'untrusted-setup',
+  `Test 7a FAILED: tampered clientSetupSig should report untrusted-setup, got ${JSON.stringify(tamperedSigResult)}`,
+);
+console.log('  Test 7a PASS: tampered clientSetupSig rejected as untrusted-setup');
+
+const missingSigResult = verifyProofResult({
+  ...auth,
+  clientSetupSig: undefined,
+  clientSetup,
+  blockIds,
+  challenge,
+  proofBytes,
+});
+assert(
+  missingSigResult.verified === false && missingSigResult.reason === 'untrusted-setup',
+  'Test 7b FAILED: a missing clientSetupSig must be treated the same as a wrong one, not skipped',
+);
+console.log('  Test 7b PASS: missing clientSetupSig rejected as untrusted-setup (fail closed, not skipped)');
+
+const wrongKeyIdResult = verifyProofResult({
+  ...auth,
+  keyId: 'a-different-key',
+  clientSetup,
+  blockIds,
+  challenge,
+  proofBytes,
+});
+assert(
+  wrongKeyIdResult.verified === false && wrongKeyIdResult.reason === 'untrusted-setup',
+  'Test 7c FAILED: a genuine signature for one keyId must not verify under a different keyId',
+);
+console.log('  Test 7c PASS: signature does not verify under the wrong keyId');
+
+const tamperedRawResult = verifyProofResult({
+  ...auth,
+  clientSetupRaw: new Uint8Array([...clientSetupRaw, 0]), // append a byte: still well-formed JSON prefix-wise for parseClientSetup, but different signed bytes
+  clientSetup,
+  blockIds,
+  challenge,
+  proofBytes,
+});
+assert(
+  tamperedRawResult.verified === false && tamperedRawResult.reason === 'untrusted-setup',
+  'Test 7d FAILED: a genuine signature must not verify against different raw client_setup bytes',
+);
+console.log('  Test 7d PASS: signature does not verify against tampered clientSetupRaw');
 
 // ---------------------------------------------------------------------------
 // Done

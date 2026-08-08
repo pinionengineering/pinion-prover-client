@@ -103,11 +103,24 @@ export interface RawTaggedRoot {
   root: string;          // CID string (e.g. "bafybeig...")
   block_ids?: string[];  // CID strings in TagList order, non-chunked protocols only
   block_count?: number;  // super-block count, chunked protocols only (SW-Priv, SW-Pub)
+  /**
+   * base64 Ed25519 signature authenticating (key_id, root, block_count)
+   * against pinion-prover's fixed signing key -- see verifyBlockCountSig in
+   * trustkey.ts. Only present for chunked protocols; absent if the server
+   * wasn't configured with a signing key.
+   */
+  block_count_sig?: string;
 }
 
 /** Raw JSON from GET /api/v1/setup?key_id=<id>. */
 export interface RawSetupResponse {
   client_setup: string;    // base64 of WireClientSetup JSON
+  /**
+   * base64 Ed25519 signature authenticating (key_id, client_setup) against
+   * pinion-prover's fixed signing key -- see verifyClientSetupSig in
+   * trustkey.ts. Absent if the server wasn't configured with a signing key.
+   */
+  client_setup_sig?: string;
   roots: RawTaggedRoot[];
 }
 
@@ -131,11 +144,39 @@ export interface ParsedRoot {
    * reconstructed from `root` + a block count, never decoded as one.
    */
   chunked: boolean;
+  /**
+   * The super-block count blockIds was derived from. Only present when
+   * chunked is true; equals blockIds.length in that case, kept as its own
+   * field because it's what blockCountSig actually authenticates.
+   */
+  blockCount?: number;
+  /**
+   * Authenticates (keyId, root, blockCount) against pinion-prover's signing
+   * key -- see verifyBlockCountSig in trustkey.ts. Only present when chunked
+   * is true and the server was configured with a signing key. A chunked
+   * root with no valid blockCountSig must not be trusted: an attacker able
+   * to tamper with Firestore's stored block_count could otherwise shrink a
+   * challenge down to something trivially satisfiable.
+   */
+  blockCountSig?: Uint8Array;
 }
 
 /** Fully decoded result of getSetup(). Ready to pass to audit(). */
 export interface ParsedSetup {
   clientSetup: WireClientSetup;
+  /**
+   * Raw base64-decoded client_setup bytes, exactly what verifyClientSetupSig
+   * checks. clientSetup's re-serialization to JSON is not guaranteed to
+   * byte-match the original signed bytes (key ordering, whitespace), so
+   * verification must use this, not JSON.stringify(clientSetup).
+   */
+  clientSetupRaw: Uint8Array;
+  /**
+   * Authenticates (keyId, clientSetupRaw) against pinion-prover's signing
+   * key -- see verifyClientSetupSig in trustkey.ts. Absent if the server
+   * wasn't configured with a signing key.
+   */
+  clientSetupSig?: Uint8Array;
   roots: ParsedRoot[];
   /** Sum of block counts across all roots. */
   totalBlocks: number;
@@ -160,6 +201,8 @@ export interface ChallengeKeyInfo {
 export interface CreateKeyResponse {
   key_id: string;
   client_setup: string; // base64(JSON(WireClientSetup))
+  /** base64 Ed25519 signature; see RawSetupResponse.client_setup_sig. */
+  client_setup_sig?: string;
   label?: string; // echoes the label passed to createKey(), if any
 }
 
@@ -180,6 +223,13 @@ export interface UpdateKeyLabelRequest {
 export interface CreateKeyResult {
   keyId: string;
   publicKey: WireClientSetup;
+  /**
+   * Raw base64-decoded client_setup bytes; see ParsedSetup.clientSetupRaw
+   * for why this is kept alongside the parsed publicKey.
+   */
+  publicKeyRaw: Uint8Array;
+  /** Authenticates (keyId, publicKeyRaw); see ParsedSetup.clientSetupSig. */
+  publicKeySig?: Uint8Array;
   label?: string;
 }
 
@@ -274,14 +324,23 @@ export interface TagJobListResponse {
  *     infra error looks like from here: a 5xx with an HTML body, a proxy
  *     timeout page, a truncated response, none of which say anything about
  *     whether the server actually holds the data.
+ *   - { verified: false, reason: 'untrusted-setup', detail } means the
+ *     pairing equation was never evaluated because clientSetup or a root's
+ *     blockCount failed its authenticity check against pinion-prover's
+ *     signing key (see trustkey.ts). This is distinct from both other
+ *     failure modes: the server may hold the data just fine, but the
+ *     ClientSetup/BlockCount this check was given cannot be trusted to be
+ *     what pinion-prover's CreateKey/Tag calls actually produced, so
+ *     evaluating the pairing equation against it would prove nothing.
  *
- * verifyProof() collapses both false cases into a plain `false`, which is
- * why it's the deprecated, lower-fidelity option.
+ * verifyProof() collapses all three false cases into a plain `false`, which
+ * is why it's the deprecated, lower-fidelity option.
  */
 export type ProofVerificationResult =
   | { verified: true }
   | { verified: false; reason: 'pairing-mismatch' }
-  | { verified: false; reason: 'malformed-input'; cause: unknown };
+  | { verified: false; reason: 'malformed-input'; cause: unknown }
+  | { verified: false; reason: 'untrusted-setup'; detail: string };
 
 /** Result of a complete audit round (challenge → prove → cryptographic verify). */
 export interface AuditResult {

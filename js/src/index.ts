@@ -19,7 +19,12 @@ export type {
 
 // Verification
 export { verifyProof, verifyProofResult, parseClientSetup } from './verify.js';
-export type { VerifyParams } from './verify.js';
+export type { VerifyParams, VerifyRootEntry } from './verify.js';
+
+// ClientSetup/BlockCount authenticity (see trustkey.ts's doc comment for
+// the threat this protects against: Firestore-level tampering with data
+// verifyProofResult's pairing check would otherwise trust unconditionally).
+export { verifyClientSetupSig, verifyBlockCountSig } from './trustkey.js';
 
 // Challenge construction
 export {
