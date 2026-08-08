@@ -24,7 +24,11 @@ type CreateKeyRequest struct {
 type CreateKeyResponse struct {
 	KeyID       string `json:"key_id"`
 	ClientSetup []byte `json:"client_setup"`
-	Label       string `json:"label,omitempty"`
+	// ClientSetupSig authenticates (KeyID, ClientSetup) against a signing
+	// key held only by pinion-prover; see VerifyClientSetupSig. Empty if the
+	// server wasn't configured with a signing key.
+	ClientSetupSig []byte `json:"client_setup_sig,omitempty"`
+	Label          string `json:"label,omitempty"`
 }
 
 // UpdateKeyLabelRequest is the body for PATCH /challenge-key/:id.
@@ -54,12 +58,18 @@ type TaggedRoot struct {
 	Root       string   `json:"root"`
 	BlockIDs   []string `json:"block_ids,omitempty"`
 	BlockCount int      `json:"block_count,omitempty"`
+	// BlockCountSig authenticates (KeyID, Root, BlockCount) -- KeyID isn't
+	// repeated here since it's already the parameter this TaggedRoot was
+	// fetched under. See VerifyBlockCountSig. Only set for chunked
+	// protocols (SW-Priv, SW-Pub), same as BlockCount.
+	BlockCountSig []byte `json:"block_count_sig,omitempty"`
 }
 
 // SetupResponse is returned by GET /setup?key_id=<id>.
 type SetupResponse struct {
-	ClientSetup []byte       `json:"client_setup"`
-	Roots       []TaggedRoot `json:"roots"`
+	ClientSetup    []byte       `json:"client_setup"`
+	ClientSetupSig []byte       `json:"client_setup_sig,omitempty"` // see CreateKeyResponse.ClientSetupSig
+	Roots          []TaggedRoot `json:"roots"`
 }
 
 // TagRequest is the body for POST /tag. Root must already be pinned by the

@@ -32,17 +32,20 @@ const {
   TagFailedError,
   TagTimeoutError,
   MalformedResponseError,
+  parseTrustedKeyHex,
 } = await import(path.join(root, 'dist/index.js'));
 
 const BASE_URL = 'https://test.invalid/prover';
 
 // Genuine Ed25519 signature over frame("pinion-chalkey-v1", "test-key",
 // <testdata/vectors.json's raw client_setup bytes>), computed once against
-// trustkey.ts's hardcoded placeholder public key -- see verify.test.mjs's
-// identical constant for how it was generated and why it's pasted here
-// rather than re-signed in JS. Every test below that reaches
-// verifyProofResult's authenticity gate uses this key ID and signature.
+// TEST_TRUSTED_KEY_HEX's private half -- see verify.test.mjs's identical
+// constants for how they were generated and why they're pasted here rather
+// than re-signed in JS. Every test below that reaches verifyProofResult's
+// authenticity gate uses this key ID, trusted key, and signature.
 const TEST_KEY_ID = 'test-key';
+const TEST_TRUSTED_KEY_HEX = '4570328563453ac077277b233d99293d27b2057166f2bef397e4d60a84327ff8';
+const TEST_TRUSTED_KEY = parseTrustedKeyHex(TEST_TRUSTED_KEY_HEX);
 const TEST_CLIENT_SETUP_SIG_B64 =
   'nuQqBVQU9N6shvQ/qv/qplgYNERK4m0vczeC4wvp9hLWS/lbWAzFlOpIEu8J6unEUCF1YTRfX48mFAwvmuQ5AA==';
 
@@ -377,6 +380,7 @@ await withMockFetch(
     });
     assert(calls.length === 3, `Test 11 FAILED: expected 1 submit + 2 polls = 3 calls, got ${calls.length}`);
     const verification = verifyProofResult({
+      trustedKey: TEST_TRUSTED_KEY,
       keyId: TEST_KEY_ID,
       clientSetup: parseClientSetup(vec.client_setup),
       clientSetupRaw: base64ToBytes(vec.client_setup),
@@ -415,7 +419,7 @@ await withMockFetch(
     return jsonResponse(200, { status: 'prove-done', proof: garbageB64 });
   },
   async (calls) => {
-    const client = new PinionProverClient(BASE_URL);
+    const client = new PinionProverClient(BASE_URL, { trustedKey: TEST_TRUSTED_KEY });
     const clientSetup = parseClientSetup(vec.client_setup);
     const setup = {
       clientSetup,
@@ -461,4 +465,34 @@ await withMockFetch(
 );
 console.log('  Test 13 PASS: a non-JSON 2xx submit body still throws MalformedResponseError');
 
-console.log(`\nAll ${testCount} assertions passed across 13 tests.\n`);
+// ---------------------------------------------------------------------------
+// Test 14: audit() refuses to run with no trusted key configured, rather
+// than silently skipping the ClientSetup/BlockCount authenticity check --
+// the exact bug this redesign replaces (a hardcoded placeholder key that
+// made every real deployment's signatures fail silently-ish). No mock fetch
+// needed: the check happens before any network call.
+// ---------------------------------------------------------------------------
+{
+  const client = new PinionProverClient(BASE_URL); // no trustedKey
+  const setup = {
+    clientSetup: parseClientSetup(vec.client_setup),
+    clientSetupRaw: base64ToBytes(vec.client_setup),
+    clientSetupSig: base64ToBytes(TEST_CLIENT_SETUP_SIG_B64),
+    roots: [{ root: 'bafyTestRoot', blockIds: vec.block_ids.map(base64ToBytes), chunked: false }],
+    totalBlocks: vec.block_ids.length,
+  };
+  let threw;
+  try {
+    await client.audit(TEST_KEY_ID, setup);
+  } catch (e) {
+    threw = e;
+  }
+  assert(threw instanceof Error, 'Test 14 FAILED: audit() with no trustedKey configured should throw');
+  assert(
+    /trusted key/i.test(threw?.message ?? ''),
+    `Test 14 FAILED: expected a clear "no trusted key" error, got ${threw?.message}`,
+  );
+}
+console.log('  Test 14 PASS: audit() refuses to run without a configured trusted key');
+
+console.log(`\nAll ${testCount} assertions passed across 14 tests.\n`);

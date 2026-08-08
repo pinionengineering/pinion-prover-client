@@ -50,6 +50,13 @@ export interface VerifyRootEntry {
 }
 
 export interface VerifyParams {
+  /**
+   * Ed25519 public key ClientSetup/BlockCount signatures are checked
+   * against -- see PinionProverClientOptions.trustedKey for where this
+   * should come from. There is no default: a caller must supply the real
+   * key for whichever pinion-prover deployment these params came from.
+   */
+  trustedKey: Uint8Array;
   /** The key ID this proof was audited under -- both signatures below are bound to it. */
   keyId: string;
   /**
@@ -99,12 +106,27 @@ export interface VerifyParams {
  * so "no signature" must not be treated as "skip the check."
  */
 function checkSetupAuthenticity(params: VerifyParams): string | null {
-  if (!verifyClientSetupSig(params.keyId, params.clientSetupRaw, params.clientSetupSig ?? new Uint8Array(0))) {
+  if (
+    !verifyClientSetupSig(
+      params.trustedKey,
+      params.keyId,
+      params.clientSetupRaw,
+      params.clientSetupSig ?? new Uint8Array(0),
+    )
+  ) {
     return `ClientSetup failed authenticity check for key ${params.keyId}`;
   }
   for (const r of params.rootEntries) {
     if (r.blockCount === undefined) continue; // non-chunked: no BlockCount/BlockCountSig involved
-    if (!verifyBlockCountSig(params.keyId, r.root, r.blockCount, r.blockCountSig ?? new Uint8Array(0))) {
+    if (
+      !verifyBlockCountSig(
+        params.trustedKey,
+        params.keyId,
+        r.root,
+        r.blockCount,
+        r.blockCountSig ?? new Uint8Array(0),
+      )
+    ) {
       return `BlockCount failed authenticity check for key ${params.keyId} root ${r.root}`;
     }
   }

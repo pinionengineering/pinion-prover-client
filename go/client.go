@@ -10,15 +10,26 @@
 // long to wait), typed errors, and an Audit() convenience that runs
 // challenge → prove → verify in one call.
 //
-// Route structure (baseURL = ".../prover"):
+// Route structure:
 //
-//	Authenticated (JWT Bearer):  {baseURL}/api/v1/*
-//	Unauthenticated:             {baseURL}/prove, {baseURL}/prove/:job_id
+//	Unauthenticated:  {baseURL}/prove, {baseURL}/prove/:job_id
+//	Authenticated:    {authURL}/*
+//
+// baseURL is NewClient's argument; authURL is set separately via
+// WithAuthURL, since pinion-prover exposes the same authenticated resource
+// paths under more than one prefix depending on how the caller
+// authenticates (e.g. {baseURL}/pat/v1 for a personal access token,
+// {baseURL}/api/v1 for a JWT Bearer token) -- this package has no opinion
+// on which one you use and doesn't hardcode either. A Client needs
+// WithAuthURL and WithToken (or an already-authenticating http.Client via
+// WithHTTPClient) before making any authenticated call, and WithTrustedKey
+// before calling Audit.
 package proverclient
 
 import (
 	"bytes"
 	"context"
+	"crypto/ed25519"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -35,28 +46,56 @@ import (
 // Client is an HTTP client for one pinion-prover deployment.
 type Client struct {
 	baseURL    string
+	authURL    string
 	httpClient *http.Client
 	getToken   func(ctx context.Context) (string, error)
+	trustedKey ed25519.PublicKey
 }
 
 // Option configures a Client constructed by NewClient.
 type Option func(*Client)
 
-// WithHTTPClient overrides the default http.Client (e.g. for custom timeouts
-// or transport-level tracing).
+// WithHTTPClient overrides the default http.Client (e.g. for custom timeouts,
+// transport-level tracing, or to bring your own auth transport instead of
+// WithToken -- e.g. one that already attaches credentials on every request).
 func WithHTTPClient(hc *http.Client) Option {
 	return func(c *Client) { c.httpClient = hc }
 }
 
-// WithTokenFunc supplies a JWT Bearer token for authenticated (/api/v1/*)
-// requests. Called fresh before every authenticated request; return ("", nil)
-// if no token is available.
-func WithTokenFunc(f func(ctx context.Context) (string, error)) Option {
-	return func(c *Client) { c.getToken = f }
+// WithToken supplies a bearer token for authenticated requests, sent as
+// "Authorization: Bearer <token>". Called fresh before every authenticated
+// request; return ("", nil) if no token is available.
+func WithToken(tokenFunc func(ctx context.Context) (string, error)) Option {
+	return func(c *Client) { c.getToken = tokenFunc }
+}
+
+// WithAuthURL sets the base URL for authenticated requests (everything
+// except POST /prove and GET /prove/:job_id, which are always unauthenticated
+// and always hang off the plain baseURL passed to NewClient -- see the
+// package doc comment). Required before any authenticated call: a Client
+// with no auth URL configured returns a clear error rather than guessing
+// which of pinion-prover's authenticated route prefixes to use.
+func WithAuthURL(url string) Option {
+	return func(c *Client) { c.authURL = strings.TrimRight(url, "/") }
+}
+
+// WithTrustedKey sets the Ed25519 public key Audit checks ClientSetup/
+// BlockCount signatures against (see VerifyClientSetupSig). Required before
+// calling Audit: a Client with no trusted key configured returns a clear
+// error rather than skipping the check, which would silently defeat its
+// entire purpose. pubKey must come from something published and reviewed
+// out-of-band for whichever pinion-prover deployment baseURL points at --
+// this package has no built-in notion of "the" trusted key, since a value
+// baked into the library can't cover a deployment it doesn't know about
+// (e.g. a self-hosted one), and a value fetched from baseURL at runtime
+// would be verifying the server against itself.
+func WithTrustedKey(pubKey ed25519.PublicKey) Option {
+	return func(c *Client) { c.trustedKey = pubKey }
 }
 
 // NewClient returns a Client for the prover deployment at baseURL, e.g.
-// "https://hydrogen.pinion.build/prover".
+// "https://hydrogen.pinion.build/prover". Pass WithAuthURL and WithToken to
+// authenticate.
 func NewClient(baseURL string, opts ...Option) *Client {
 	c := &Client{
 		baseURL:    strings.TrimRight(baseURL, "/"),
@@ -74,8 +113,12 @@ func NewClient(baseURL string, opts ...Option) *Client {
 // ---------------------------------------------------------------------------
 
 func (c *Client) ListKeys(ctx context.Context) ([]ChallengeKeyInfo, error) {
+	path, err := c.authPath("/challenge-keys")
+	if err != nil {
+		return nil, err
+	}
 	var out []ChallengeKeyInfo
-	if err := c.get(ctx, "/api/v1/challenge-keys", &out); err != nil {
+	if err := c.get(ctx, path, &out); err != nil {
 		return nil, err
 	}
 	return out, nil
@@ -83,21 +126,32 @@ func (c *Client) ListKeys(ctx context.Context) ([]ChallengeKeyInfo, error) {
 
 // CreateKey creates a challenge key on the server. label may be empty.
 func (c *Client) CreateKey(ctx context.Context, protocol, label string) (*CreateKeyResponse, error) {
-	var out CreateKeyResponse
-	err := c.post(ctx, "/api/v1/challenge-key", CreateKeyRequest{Protocol: protocol, Label: label}, &out)
+	path, err := c.authPath("/challenge-key")
 	if err != nil {
+		return nil, err
+	}
+	var out CreateKeyResponse
+	if err := c.post(ctx, path, CreateKeyRequest{Protocol: protocol, Label: label}, &out); err != nil {
 		return nil, err
 	}
 	return &out, nil
 }
 
 func (c *Client) DeleteKey(ctx context.Context, keyID string) error {
-	return c.authDelete(ctx, "/api/v1/challenge-key/"+pathEscape(keyID))
+	path, err := c.authPath("/challenge-key/" + pathEscape(keyID))
+	if err != nil {
+		return err
+	}
+	return c.authDelete(ctx, path)
 }
 
 // UpdateKeyLabel renames a key after creation. Pass an empty label to clear it.
 func (c *Client) UpdateKeyLabel(ctx context.Context, keyID, label string) error {
-	return c.authPatch(ctx, "/api/v1/challenge-key/"+pathEscape(keyID), UpdateKeyLabelRequest{Label: label})
+	path, err := c.authPath("/challenge-key/" + pathEscape(keyID))
+	if err != nil {
+		return err
+	}
+	return c.authPatch(ctx, path, UpdateKeyLabelRequest{Label: label})
 }
 
 // ---------------------------------------------------------------------------
@@ -108,8 +162,12 @@ func (c *Client) UpdateKeyLabel(ctx context.Context, keyID, label string) error 
 // per registered root, either the block ID list (non-chunked protocols) or
 // the super-block count (chunked protocols: SW-Priv, SW-Pub).
 func (c *Client) GetSetup(ctx context.Context, keyID string) (*SetupResponse, error) {
+	path, err := c.authPath("/setup?key_id=" + pathEscape(keyID))
+	if err != nil {
+		return nil, err
+	}
 	var out SetupResponse
-	if err := c.get(ctx, "/api/v1/setup?key_id="+pathEscape(keyID), &out); err != nil {
+	if err := c.get(ctx, path, &out); err != nil {
 		return nil, err
 	}
 	return &out, nil
@@ -125,8 +183,12 @@ func (c *Client) GetSetup(ctx context.Context, keyID string) (*SetupResponse, er
 // state, then GetSetup to get the updated block ID list for the next audit
 // cycle.
 func (c *Client) Tag(ctx context.Context, root, keyID string) (*TagSubmission, error) {
+	path, err := c.authPath("/tag")
+	if err != nil {
+		return nil, err
+	}
 	var jobResp TagJobResponse
-	if err := c.post(ctx, "/api/v1/tag", TagRequest{Root: root, KeyID: keyID}, &jobResp); err != nil {
+	if err := c.post(ctx, path, TagRequest{Root: root, KeyID: keyID}, &jobResp); err != nil {
 		return nil, fmt.Errorf("tag %s: %w", root, err)
 	}
 	return &TagSubmission{JobID: jobResp.JobID, Root: root, KeyID: keyID}, nil
@@ -141,7 +203,7 @@ type WaitForTagOptions struct {
 	OnProgress func(progress TagJobProgress, status string)
 }
 
-// WaitForTag polls GET /api/v1/tag/:job_id until the job reaches a terminal
+// WaitForTag polls GET {tier}/tag/:job_id until the job reaches a terminal
 // state, returning the completed status (with the block ID list/count) once
 // "tag-done", or a *TagFailedError once "tag-failed".
 //
@@ -184,8 +246,12 @@ func (c *Client) WaitForTag(ctx context.Context, jobID string, opts *WaitForTagO
 // TagStatus polls the status of a tag job started by Tag, without waiting
 // for it to reach a terminal state. Useful for building progress UI.
 func (c *Client) TagStatus(ctx context.Context, jobID string) (*TagJobStatusResponse, error) {
+	path, err := c.authPath("/tag/" + pathEscape(jobID))
+	if err != nil {
+		return nil, err
+	}
 	var out TagJobStatusResponse
-	if err := c.get(ctx, "/api/v1/tag/"+pathEscape(jobID), &out); err != nil {
+	if err := c.get(ctx, path, &out); err != nil {
 		return nil, err
 	}
 	return &out, nil
@@ -196,7 +262,10 @@ func (c *Client) TagStatus(ctx context.Context, jobID string) (*TagJobStatusResp
 // what a "tagging in progress" indicator should poll, since it works without
 // already knowing a job ID.
 func (c *Client) ListTagJobs(ctx context.Context, active bool) ([]TagJobListEntry, error) {
-	path := "/api/v1/tag"
+	path, err := c.authPath("/tag")
+	if err != nil {
+		return nil, err
+	}
 	if active {
 		path += "?active=true"
 	}
@@ -208,7 +277,11 @@ func (c *Client) ListTagJobs(ctx context.Context, active bool) ([]TagJobListEntr
 }
 
 func (c *Client) Deregister(ctx context.Context, keyID, root string) error {
-	return c.authDelete(ctx, "/api/v1/register/"+pathEscape(keyID)+"/"+pathEscape(root))
+	path, err := c.authPath("/register/" + pathEscape(keyID) + "/" + pathEscape(root))
+	if err != nil {
+		return err
+	}
+	return c.authDelete(ctx, path)
 }
 
 // ---------------------------------------------------------------------------
@@ -235,11 +308,20 @@ func (c *Client) Prove(ctx context.Context, keyID string, roots []string, challe
 	defer resp.Body.Close()
 	respBody, _ := io.ReadAll(resp.Body)
 	if resp.StatusCode == http.StatusConflict {
-		var body struct {
-			CID string `json:"cid"`
+		// The server's error envelope is {code, message, request_id} (see
+		// ginmiddleware/apierror.Abort4xx) -- there's no separate "cid"
+		// field, message already names the CID in readable prose. Fall
+		// back to something non-empty if the body is somehow missing or
+		// doesn't match, so this never regresses to a blank message.
+		var errBody struct {
+			Message string `json:"message"`
 		}
-		_ = json.Unmarshal(respBody, &body)
-		return nil, &PinNotActiveError{CID: body.CID}
+		_ = json.Unmarshal(respBody, &errBody)
+		msg := errBody.Message
+		if msg == "" {
+			msg = "pin not active: " + string(respBody)
+		}
+		return nil, &PinNotActiveError{Message: msg}
 	}
 	if resp.StatusCode != http.StatusAccepted {
 		return nil, &ProverError{Status: resp.StatusCode, Body: string(respBody)}
@@ -306,7 +388,7 @@ func (c *Client) WaitForProve(ctx context.Context, jobID string, opts *WaitForPr
 // ProveStatus polls the status of a proof job started by Prove.
 func (c *Client) ProveStatus(ctx context.Context, jobID string) (*ProveJobStatusResponse, error) {
 	var out ProveJobStatusResponse
-	if err := c.get(ctx, "/prove/"+pathEscape(jobID), &out); err != nil {
+	if err := c.get(ctx, c.baseURL+"/prove/"+pathEscape(jobID), &out); err != nil {
 		return nil, err
 	}
 	return &out, nil
@@ -358,6 +440,13 @@ func (c *Client) Audit(ctx context.Context, keyID string, setup *SetupResponse, 
 	chalSize := opts.ChallengeSize
 	if chalSize <= 0 {
 		chalSize = 20
+	}
+
+	if c.trustedKey == nil {
+		return nil, fmt.Errorf("proverclient: no trusted key configured; pass WithTrustedKey(...) to NewClient")
+	}
+	if err := verifySetupAuthenticity(c.trustedKey, keyID, setup, targetRoots); err != nil {
+		return nil, err
 	}
 
 	combinedIDs, err := BuildCombinedIDs(setup, targetRoots)
@@ -472,6 +561,16 @@ func BuildCombinedIDs(setup *SetupResponse, targetRoots []string) ([][]byte, err
 // HTTP helpers
 // ---------------------------------------------------------------------------
 
+// authPath builds the full URL for an authenticated request, rooted at
+// whatever WithAuthURL configured. Errors if it wasn't, rather than
+// silently falling back to baseURL and producing a confusing 404/401.
+func (c *Client) authPath(suffix string) (string, error) {
+	if c.authURL == "" {
+		return "", fmt.Errorf("proverclient: no auth URL configured; pass WithAuthURL(...) to NewClient")
+	}
+	return c.authURL + suffix, nil
+}
+
 func pathEscape(s string) string {
 	// Path segments here are UUIDs/CIDs, no reserved characters, but escape
 	// defensively rather than assume that never changes.
@@ -528,12 +627,18 @@ func (c *Client) authHeaders(ctx context.Context) (map[string]string, error) {
 	return map[string]string{"Authorization": "Bearer " + token}, nil
 }
 
-func (c *Client) get(ctx context.Context, path string, out any) error {
+// get, post, authDelete, and authPatch all take a fully-qualified URL, not
+// a path relative to baseURL: callers build that themselves, either via
+// authPath (for the authenticated routes rooted at authURL) or by
+// prepending baseURL directly (for the couple of unauthenticated routes,
+// e.g. ProveStatus). Keeping "what's the root for this call" entirely at
+// the call site avoids this layer having to guess.
+func (c *Client) get(ctx context.Context, url string, out any) error {
 	headers, err := c.authHeaders(ctx)
 	if err != nil {
 		return err
 	}
-	resp, err := c.httpClient.Do(mustRequest(ctx, http.MethodGet, c.baseURL+path, nil, headers))
+	resp, err := c.httpClient.Do(mustRequest(ctx, http.MethodGet, url, nil, headers))
 	if err != nil {
 		return err
 	}
@@ -541,7 +646,7 @@ func (c *Client) get(ctx context.Context, path string, out any) error {
 	return decodeOrError(resp, out)
 }
 
-func (c *Client) post(ctx context.Context, path string, body, out any) error {
+func (c *Client) post(ctx context.Context, url string, body, out any) error {
 	headers, err := c.authHeaders(ctx)
 	if err != nil {
 		return err
@@ -550,7 +655,7 @@ func (c *Client) post(ctx context.Context, path string, body, out any) error {
 	if err != nil {
 		return err
 	}
-	resp, err := c.httpClient.Do(mustRequest(ctx, http.MethodPost, c.baseURL+path, data, headers))
+	resp, err := c.httpClient.Do(mustRequest(ctx, http.MethodPost, url, data, headers))
 	if err != nil {
 		return err
 	}
@@ -558,12 +663,12 @@ func (c *Client) post(ctx context.Context, path string, body, out any) error {
 	return decodeOrError(resp, out)
 }
 
-func (c *Client) authDelete(ctx context.Context, path string) error {
+func (c *Client) authDelete(ctx context.Context, url string) error {
 	headers, err := c.authHeaders(ctx)
 	if err != nil {
 		return err
 	}
-	resp, err := c.httpClient.Do(mustRequest(ctx, http.MethodDelete, c.baseURL+path, nil, headers))
+	resp, err := c.httpClient.Do(mustRequest(ctx, http.MethodDelete, url, nil, headers))
 	if err != nil {
 		return err
 	}
@@ -571,7 +676,7 @@ func (c *Client) authDelete(ctx context.Context, path string) error {
 	return decodeOrError(resp, nil)
 }
 
-func (c *Client) authPatch(ctx context.Context, path string, body any) error {
+func (c *Client) authPatch(ctx context.Context, url string, body any) error {
 	headers, err := c.authHeaders(ctx)
 	if err != nil {
 		return err
@@ -580,7 +685,7 @@ func (c *Client) authPatch(ctx context.Context, path string, body any) error {
 	if err != nil {
 		return err
 	}
-	resp, err := c.httpClient.Do(mustRequest(ctx, http.MethodPatch, c.baseURL+path, data, headers))
+	resp, err := c.httpClient.Do(mustRequest(ctx, http.MethodPatch, url, data, headers))
 	if err != nil {
 		return err
 	}

@@ -49,6 +49,30 @@ waits, and verifies) but now also accepts `pollIntervalMs`/`signal`/
 `onStatus` so you can build progress UI or cancel a long-running round; see
 its section below.
 
+### Upgrading from 0.11.x
+
+`audit()` and `verifyProofResult()`/`verifyProof()` now require a
+**caller-supplied `trustedKey`** (raw 32-byte Ed25519 public key; decode a
+hex string with the new `parseTrustedKeyHex()`). Previously the ClientSetup/
+BlockCount authenticity check verified against a fixed placeholder key baked
+into this package's source — a leftover development value that never
+matched any real pinion-prover deployment, so the check always failed
+against hydrogen/helium in practice. There is no default anymore: hydrogen
+and helium each sign with their own keypair, and this package has no way to
+know which deployment `baseUrl` points at, so you must supply the matching
+public key yourself, published out-of-band (see
+[pinion.build/docs#tag-signing](https://pinion.build/docs#tag-signing)).
+
+```typescript
+const client = new PinionProverClient(proverUrl, {
+  getToken,
+  trustedKey: parseTrustedKeyHex(process.env.PROVER_TRUSTED_KEY),
+});
+```
+
+`audit()` throws immediately (before any network call) if `trustedKey` was
+not passed to the constructor, rather than silently skipping the check.
+
 ---
 
 ## How It Works
@@ -103,10 +127,12 @@ proof-of-storage evidence collected over time.
 ## Quick Start
 
 ```typescript
-import { PinionProverClient } from '@pinionengineering/prover-client';
+import { PinionProverClient, parseTrustedKeyHex } from '@pinionengineering/prover-client';
 
 const client = new PinionProverClient('https://example.com/prover', {
   getToken: async () => myAuthService.getToken(),
+  // Published out-of-band per deployment -- see "Upgrading from 0.11.x" above.
+  trustedKey: parseTrustedKeyHex(process.env.PROVER_TRUSTED_KEY),
 });
 
 // ── Setup phase ────────────────────────────────────────────────────────────
@@ -162,12 +188,20 @@ Expected output:
 ```typescript
 const client = new PinionProverClient(
   'https://hydrogen.pinion.build/prover',
-  { getToken: async () => 'Bearer ...' }
+  {
+    getToken: async () => 'Bearer ...',
+    trustedKey: parseTrustedKeyHex('185c0993...'), // required for audit()
+  }
 );
 ```
 
 `baseUrl` must include the path prefix (e.g., `/prover`). All authenticated endpoints use
 `Bearer` tokens obtained from `getToken()`.
+
+| Option | Type | Description |
+|--------|------|-------------|
+| `getToken` | `() => Promise<string \| null \| undefined>` | Returns a JWT Bearer token for authenticated endpoints. Called fresh before every authenticated request. |
+| `trustedKey` | `Uint8Array` | Ed25519 public key (32 bytes) `audit()` checks ClientSetup/BlockCount signatures against. Required before calling `audit()`; decode a hex-encoded key with `parseTrustedKeyHex()`. Get the real key for hydrogen/helium from [pinion.build/docs#tag-signing](https://pinion.build/docs#tag-signing) — never from `baseUrl` itself at runtime, which would just verify the server against itself. |
 
 ---
 
@@ -324,6 +358,11 @@ const result = await client.audit(keyId, setup, {
 Throws `PinNotActiveError` if any root is no longer in the `"pinned"` state.
 Throws `ProverError` on HTTP errors from the server. Throws
 `ProveTimeoutError` if `options.signal` fires before the proof completes.
+Throws immediately, before any network call, if the client was constructed
+without `trustedKey` (see the constructor reference above): `audit()`
+cryptographically verifies the server's ClientSetup/BlockCount signatures
+before trusting anything in them, and refuses to run without a key to check
+against rather than silently skipping the check.
 
 ---
 
@@ -372,26 +411,35 @@ proof takes unless `options.signal` fires first, in which case it throws
 ##### `verifyProof(params)` → `boolean`
 
 ```typescript
-import { verifyProof } from '@pinionengineering/prover-client';
+import { verifyProof, parseTrustedKeyHex } from '@pinionengineering/prover-client';
 
 const pass = verifyProof({
-  clientSetup: setup.clientSetup,  // or publicKey from createKey()
-  blockIds,                        // Uint8Array[] from setup.roots[i].blockIds
-  challenge,                       // the string returned by buildChallenge()
-  proofBytes,                      // raw bytes from prove()
+  trustedKey: parseTrustedKeyHex(process.env.PROVER_TRUSTED_KEY), // see "Upgrading from 0.11.x" above
+  keyId,                            // the challenge key this setup/proof belong to
+  clientSetup: setup.clientSetup,   // parsed WireClientSetup (or publicKey from createKey())
+  clientSetupRaw: setup.clientSetupRaw, // raw bytes verifyClientSetupSig checks the signature over
+  clientSetupSig: setup.clientSetupSig, // signature from the setup response
+  rootEntries: setup.roots.map(r => ({ root: r.root, blockCount: r.blockCount, blockCountSig: r.blockCountSig })),
+  blockIds,                         // Uint8Array[] from setup.roots[i].blockIds
+  challenge,                        // the string returned by buildChallenge()
+  proofBytes,                       // raw bytes from prove()
 });
 ```
 
-Runs the BN254 pairing check locally.  Returns `true` only if
-`e(σ,G₂) == e(A,V)`.  Safe to call without a client instance: useful for
-offline verification or integration with existing infrastructure.
+Runs the ClientSetup/BlockCount authenticity check against `trustedKey`
+first (see `PinionProverClientOptions.trustedKey` above), then the BN254
+pairing check locally.  Returns `true` only if both pass.  Safe to call
+without a client instance: useful for offline verification or integration
+with existing infrastructure. Prefer `verifyProofResult()` (below) when you
+need to distinguish *why* verification failed.
 
 ##### Full low-level example
 
 ```typescript
-import { PinionProverClient, buildChallenge, verifyProof } from '@pinionengineering/prover-client';
+import { PinionProverClient, buildChallenge, verifyProof, parseTrustedKeyHex } from '@pinionengineering/prover-client';
 
-const client = new PinionProverClient(proverUrl, { getToken });
+const trustedKey = parseTrustedKeyHex(process.env.PROVER_TRUSTED_KEY);
+const client = new PinionProverClient(proverUrl, { getToken, trustedKey });
 
 // Setup phase
 const { keyId } = await client.createKey();
@@ -407,7 +455,12 @@ const submission = await client.prove(keyId, [root.root], challenge);
 const proofBytes = await client.waitForProve(submission.jobId, { challenge, roots: [root.root] });
 
 const pass = verifyProof({
+  trustedKey,
+  keyId,
   clientSetup: setup.clientSetup,
+  clientSetupRaw: setup.clientSetupRaw,
+  clientSetupSig: setup.clientSetupSig,
+  rootEntries: [{ root: root.root, blockCount: root.blockCount, blockCountSig: root.blockCountSig }],
   blockIds,
   challenge,
   proofBytes,
@@ -419,11 +472,12 @@ const pass = verifyProof({
 ### Standalone Verification
 
 You can verify a proof with no HTTP client at all, as long as you have the
-public key and block IDs from a prior setup call:
+trusted key, public key, and block IDs from a prior setup call:
 
 ```typescript
-import { buildChallenge, verifyProof, parseClientSetup } from '@pinionengineering/prover-client';
+import { buildChallenge, verifyProof, parseClientSetup, parseTrustedKeyHex } from '@pinionengineering/prover-client';
 
+const trustedKey = parseTrustedKeyHex(process.env.PROVER_TRUSTED_KEY);
 const clientSetup = parseClientSetup(storedClientSetupBase64);
 
 // blockIds from a prior getSetup() call, decoded to Uint8Array[]:
@@ -431,7 +485,17 @@ const challenge = buildChallenge(5, blockIds.length);
 
 // ...send challenge to POST /prove yourself, receive proofBytes...
 
-const pass = verifyProof({ clientSetup, blockIds, challenge, proofBytes });
+const pass = verifyProof({
+  trustedKey,
+  keyId,
+  clientSetup,
+  clientSetupRaw, // raw bytes from the stored setup response, alongside clientSetup
+  clientSetupSig,
+  rootEntries,
+  blockIds,
+  challenge,
+  proofBytes,
+});
 ```
 
 ---

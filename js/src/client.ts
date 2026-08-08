@@ -7,6 +7,16 @@
  *
  * Pass the full base URL including the path prefix, e.g.:
  *   new PinionProverClient("https://hydrogen.pinion.build/prover", { getToken })
+ *
+ * audit() additionally requires trustedKey: the Ed25519 public key that
+ * authenticates ClientSetup/BlockCount data (see PinionProverClientOptions.trustedKey
+ * and trustkey.ts). This package has no built-in notion of "the" trusted key --
+ * hydrogen and helium each sign with their own keypair -- so it must be supplied
+ * per deployment, e.g.:
+ *   new PinionProverClient("https://hydrogen.pinion.build/prover", {
+ *     getToken,
+ *     trustedKey: parseTrustedKeyHex(process.env.NEXT_PUBLIC_PROVER_TRUSTED_KEY),
+ *   })
  */
 
 import type {
@@ -39,6 +49,19 @@ export interface PinionProverClientOptions {
    * if no token is available.  Called fresh before every authenticated request.
    */
   getToken?: () => Promise<string | null | undefined>;
+  /**
+   * Ed25519 public key (raw 32 bytes; decode a hex string with parseTrustedKeyHex)
+   * audit() checks ClientSetup/BlockCount signatures against. Required before
+   * calling audit(): a Client with no trusted key configured throws a clear
+   * error rather than skipping the check, which would silently defeat its
+   * entire purpose. Must come from something published and reviewed
+   * out-of-band for whichever pinion-prover deployment baseUrl points at --
+   * this package has no built-in notion of "the" trusted key, since a value
+   * baked into the library can't cover a deployment it doesn't know about,
+   * and a value fetched from baseUrl at runtime would be verifying the
+   * server against itself.
+   */
+  trustedKey?: Uint8Array;
 }
 
 /**
@@ -126,10 +149,12 @@ export interface WaitForProveOptions {
 export class PinionProverClient {
   private readonly baseUrl: string;
   private readonly getToken: () => Promise<string | null | undefined>;
+  private readonly trustedKey?: Uint8Array;
 
   constructor(baseUrl: string, options: PinionProverClientOptions = {}) {
     this.baseUrl = baseUrl.replace(/\/$/, '');
     this.getToken = options.getToken ?? (() => Promise.resolve(null));
+    this.trustedKey = options.trustedKey;
   }
 
   // ---------------------------------------------------------------------------
@@ -386,6 +411,11 @@ export class PinionProverClient {
    * Throws `PinNotActiveError` if any challenged root is no longer pinned.
    */
   async audit(keyId: string, setup: ParsedSetup, options: AuditOptions = {}): Promise<AuditResult> {
+    if (!this.trustedKey) {
+      throw new Error(
+        'PinionProverClient: no trusted key configured; pass trustedKey to the constructor options before calling audit()',
+      );
+    }
     const targetRoots = options.roots ?? setup.roots.map((r) => r.root);
     const challengePct = options.challengePct ?? 1;
 
@@ -413,6 +443,7 @@ export class PinionProverClient {
     });
 
     const verification = verifyProofResult({
+      trustedKey: this.trustedKey,
       keyId,
       clientSetup: setup.clientSetup,
       clientSetupRaw: setup.clientSetupRaw,

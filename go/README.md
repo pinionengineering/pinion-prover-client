@@ -43,10 +43,16 @@ round.
 ```go
 import proverclient "github.com/pinionengineering/pinion-prover-client/go"
 
-client := proverclient.NewClient("https://hydrogen.pinion.build/prover",
-	proverclient.WithTokenFunc(func(ctx context.Context) (string, error) {
+const baseURL = "https://hydrogen.pinion.build/prover"
+client := proverclient.NewClient(baseURL,
+	proverclient.WithAuthURL(baseURL+"/pat/v1"),
+	proverclient.WithToken(func(ctx context.Context) (string, error) {
 		return myPAT, nil
 	}),
+	// Required for Audit: the Ed25519 public key published for whichever
+	// pinion-prover deployment baseURL points at. Get this out-of-band --
+	// never fetch it from baseURL itself, see WithTrustedKey's doc comment.
+	proverclient.WithTrustedKey(hydrogenTrustedPubKey),
 )
 
 // Setup phase: done once (or after adding/removing roots)

@@ -30,14 +30,17 @@ func (e *MalformedResponseError) Error() string {
 func (e *MalformedResponseError) Unwrap() error { return e.Cause }
 
 // PinNotActiveError is returned by Prove when the server responds 409
-// because a pin is no longer in the "pinned" lifecycle state. The caller
-// should refresh the key's setup and deregister or re-tag the stale root.
+// because a pin is no longer in the "pinned" lifecycle state -- most often
+// because the pin was deleted after being tagged, since tag data isn't
+// automatically cleaned up when its underlying pin goes away. Message is
+// the server's own explanation, which already names the offending CID; the
+// caller should refresh the key's setup and deregister or re-tag it.
 type PinNotActiveError struct {
-	CID string
+	Message string
 }
 
 func (e *PinNotActiveError) Error() string {
-	return fmt.Sprintf("pin %s is not in pinned state", e.CID)
+	return e.Message
 }
 
 // TagFailedError is returned by Tag when the async tag job reaches the
@@ -62,4 +65,25 @@ type ProveFailedError struct {
 
 func (e *ProveFailedError) Error() string {
 	return fmt.Sprintf("prove job %s failed: %s", e.JobID, e.Reason)
+}
+
+// UntrustedSetupError is returned by Audit when a SetupResponse's
+// ClientSetup or a root's BlockCount doesn't verify against the fixed
+// pinion trust key (see trustkey.go). This means the data cannot be trusted
+// to be what pinion-prover's CreateKey/Tag calls actually produced -- it may
+// have been tampered with in storage, or the server was misconfigured
+// without a signing key. Audit refuses to build a Challenger or run any
+// verification against unverified data; callers must not retry with the
+// same setup unchanged.
+type UntrustedSetupError struct {
+	KeyID  string
+	Root   string // empty when the failure is on ClientSetup itself, not a specific root
+	Reason string
+}
+
+func (e *UntrustedSetupError) Error() string {
+	if e.Root == "" {
+		return fmt.Sprintf("pinion-prover: key %s: ClientSetup failed authenticity check: %s", e.KeyID, e.Reason)
+	}
+	return fmt.Sprintf("pinion-prover: key %s root %s: BlockCount failed authenticity check: %s", e.KeyID, e.Root, e.Reason)
 }

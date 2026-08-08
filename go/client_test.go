@@ -3,6 +3,7 @@ package proverclient
 import (
 	"bytes"
 	"context"
+	"crypto/ed25519"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -29,7 +30,24 @@ func newTestServer(t *testing.T, handler http.HandlerFunc) *Client {
 	t.Helper()
 	srv := httptest.NewServer(handler)
 	t.Cleanup(srv.Close)
-	return NewClient(srv.URL)
+	return NewClient(srv.URL,
+		WithAuthURL(srv.URL+"/api/v1"),
+		WithToken(func(context.Context) (string, error) { return "", nil }),
+	)
+}
+
+// newTestServerWithTrustedKey is newTestServer plus WithTrustedKey, for the
+// Audit tests that need signature verification -- everything else (Tag,
+// Prove, WaitFor*, ...) doesn't touch trustedKey at all.
+func newTestServerWithTrustedKey(t *testing.T, pub ed25519.PublicKey, handler http.HandlerFunc) *Client {
+	t.Helper()
+	srv := httptest.NewServer(handler)
+	t.Cleanup(srv.Close)
+	return NewClient(srv.URL,
+		WithAuthURL(srv.URL+"/api/v1"),
+		WithToken(func(context.Context) (string, error) { return "", nil }),
+		WithTrustedKey(pub),
+	)
 }
 
 func writeJSON(w http.ResponseWriter, status int, v any) {
@@ -77,9 +95,11 @@ type swPubFixture struct {
 	setup  *SetupResponse
 	store  blocks.BlockStore
 	prover line.Prover
+	pub    ed25519.PublicKey
+	priv   ed25519.PrivateKey
 }
 
-func newSWPubFixture(t *testing.T, blockCount int) *swPubFixture {
+func newSWPubFixture(t *testing.T, keyID string, blockCount int) *swPubFixture {
 	t.Helper()
 	const blockSize = 64
 	const sectorsPerBlock = 4
@@ -123,13 +143,21 @@ func newSWPubFixture(t *testing.T, blockCount int) *swPubFixture {
 		t.Fatalf("NewProver: %v", err)
 	}
 
+	pub, priv := testChalKeySigningKeypair(t)
 	return &swPubFixture{
 		setup: &SetupResponse{
-			ClientSetup: clientSetup,
-			Roots:       []TaggedRoot{{Root: rootCID.String(), BlockCount: blockCount}},
+			ClientSetup:    clientSetup,
+			ClientSetupSig: testSignClientSetup(t, priv, keyID, clientSetup),
+			Roots: []TaggedRoot{{
+				Root:          rootCID.String(),
+				BlockCount:    blockCount,
+				BlockCountSig: testSignBlockCount(t, priv, keyID, rootCID.String(), blockCount),
+			}},
 		},
 		store:  store,
 		prover: prover,
+		pub:    pub,
+		priv:   priv,
 	}
 }
 
@@ -300,14 +328,20 @@ func TestProve_SubmitOnly(t *testing.T) {
 }
 
 func TestProve_PinNotActiveError(t *testing.T) {
+	// Mocks the real server envelope (ginmiddleware/apierror.Abort4xx:
+	// {code, message, request_id}), not an invented {cid: ...} shape --
+	// this test previously mocked a body the real server never sends,
+	// which is exactly how the parsing bug it's now guarding against
+	// went unnoticed.
+	const msg = `the CID "bafy-stale" is not currently in a pinned state; only pinned CIDs can be proved.`
 	c := newTestServer(t, func(w http.ResponseWriter, r *http.Request) {
-		writeJSON(w, http.StatusConflict, map[string]string{"cid": "bafy-stale"})
+		writeJSON(w, http.StatusConflict, map[string]string{"code": "pin_not_active", "message": msg})
 	})
 
 	_, err := c.Prove(context.Background(), "key-1", []string{"root-a"}, []byte("chal"), "")
 	var pinErr *PinNotActiveError
-	if !errors.As(err, &pinErr) || pinErr.CID != "bafy-stale" {
-		t.Fatalf("expected *PinNotActiveError{CID: bafy-stale}, got %v (%T)", err, err)
+	if !errors.As(err, &pinErr) || pinErr.Message != msg {
+		t.Fatalf("expected *PinNotActiveError{Message: %q}, got %v (%T)", msg, err, err)
 	}
 }
 
@@ -437,7 +471,7 @@ func TestWaitForProve_CtxCancelIsPrompt(t *testing.T) {
 // ---------------------------------------------------------------------------
 
 func TestAudit_RealCryptoPass(t *testing.T) {
-	fx := newSWPubFixture(t, 8)
+	fx := newSWPubFixture(t, "key-1", 8)
 
 	type job struct {
 		proof []byte
@@ -446,7 +480,7 @@ func TestAudit_RealCryptoPass(t *testing.T) {
 	var mu sync.Mutex
 	jobs := make(map[string]*job)
 
-	c := newTestServer(t, func(w http.ResponseWriter, r *http.Request) {
+	c := newTestServerWithTrustedKey(t, fx.pub, func(w http.ResponseWriter, r *http.Request) {
 		switch {
 		case r.Method == http.MethodPost && r.URL.Path == "/prove":
 			var req ProveRequest
@@ -507,9 +541,9 @@ func TestAudit_RealCryptoPass(t *testing.T) {
 }
 
 func TestAudit_ProveFailed_PropagatesChallengeAndRoots(t *testing.T) {
-	fx := newSWPubFixture(t, 4)
+	fx := newSWPubFixture(t, "key-1", 4)
 
-	c := newTestServer(t, func(w http.ResponseWriter, r *http.Request) {
+	c := newTestServerWithTrustedKey(t, fx.pub, func(w http.ResponseWriter, r *http.Request) {
 		switch {
 		case r.Method == http.MethodPost && r.URL.Path == "/prove":
 			writeJSON(w, http.StatusAccepted, ProveJobResponse{JobID: "job-1"})
@@ -534,5 +568,76 @@ func TestAudit_ProveFailed_PropagatesChallengeAndRoots(t *testing.T) {
 	}
 	if len(failErr.Challenge) == 0 || len(failErr.Roots) == 0 {
 		t.Fatalf("expected Audit to pass Challenge/Roots through to WaitForProve so ProveFailedError carries them, got Challenge=%v Roots=%v", failErr.Challenge, failErr.Roots)
+	}
+}
+
+// TestAudit_TamperedClientSetupSigRejected and
+// TestAudit_TamperedBlockCountSigRejected are the actual security-relevant
+// checks: not just that a genuine signature passes (already covered above
+// and in trustkey_test.go's unit tests), but that Audit refuses to even
+// contact the server -- no /prove request should ever be sent -- once the
+// setup it was given fails authenticity. A server that only gets hit for
+// genuinely-authenticated setups is the whole point.
+func TestAudit_TamperedClientSetupSigRejected(t *testing.T) {
+	fx := newSWPubFixture(t, "key-1", 4)
+	fx.setup.ClientSetupSig[0] ^= 0xFF // flip a byte: still well-formed, no longer valid
+
+	c := newTestServerWithTrustedKey(t, fx.pub, func(w http.ResponseWriter, r *http.Request) {
+		t.Errorf("unexpected request %s %s: Audit must reject before contacting the server", r.Method, r.URL.Path)
+		w.WriteHeader(http.StatusInternalServerError)
+	})
+
+	_, err := c.Audit(context.Background(), "key-1", fx.setup, "sw-pub", &AuditOptions{
+		Roots: []string{fx.setup.Roots[0].Root},
+	})
+	var untrusted *UntrustedSetupError
+	if !errors.As(err, &untrusted) {
+		t.Fatalf("expected *UntrustedSetupError, got %v (%T)", err, err)
+	}
+	if untrusted.Root != "" {
+		t.Fatalf("expected the ClientSetup-level failure (empty Root), got Root=%q", untrusted.Root)
+	}
+}
+
+func TestAudit_TamperedBlockCountSigRejected(t *testing.T) {
+	fx := newSWPubFixture(t, "key-1", 4)
+	fx.setup.Roots[0].BlockCountSig[0] ^= 0xFF
+
+	c := newTestServerWithTrustedKey(t, fx.pub, func(w http.ResponseWriter, r *http.Request) {
+		t.Errorf("unexpected request %s %s: Audit must reject before contacting the server", r.Method, r.URL.Path)
+		w.WriteHeader(http.StatusInternalServerError)
+	})
+
+	_, err := c.Audit(context.Background(), "key-1", fx.setup, "sw-pub", &AuditOptions{
+		Roots: []string{fx.setup.Roots[0].Root},
+	})
+	var untrusted *UntrustedSetupError
+	if !errors.As(err, &untrusted) {
+		t.Fatalf("expected *UntrustedSetupError, got %v (%T)", err, err)
+	}
+	if untrusted.Root != fx.setup.Roots[0].Root {
+		t.Fatalf("expected the BlockCount-level failure naming the tampered root, got Root=%q", untrusted.Root)
+	}
+}
+
+// A different key's genuine signature must not verify for this key --
+// otherwise an attacker with a legitimate key of their own could sign their
+// ClientSetup and swap it in wherever they wanted, sidestepping the whole
+// point of binding the signature to KeyID.
+func TestAudit_ClientSetupSigForWrongKeyRejected(t *testing.T) {
+	fx := newSWPubFixture(t, "key-1", 4)
+	fx.setup.ClientSetupSig = testSignClientSetup(t, fx.priv, "someone-elses-key", fx.setup.ClientSetup)
+
+	c := newTestServerWithTrustedKey(t, fx.pub, func(w http.ResponseWriter, r *http.Request) {
+		t.Errorf("unexpected request %s %s: Audit must reject before contacting the server", r.Method, r.URL.Path)
+		w.WriteHeader(http.StatusInternalServerError)
+	})
+
+	_, err := c.Audit(context.Background(), "key-1", fx.setup, "sw-pub", &AuditOptions{
+		Roots: []string{fx.setup.Roots[0].Root},
+	})
+	var untrusted *UntrustedSetupError
+	if !errors.As(err, &untrusted) {
+		t.Fatalf("expected *UntrustedSetupError, got %v (%T)", err, err)
 	}
 }

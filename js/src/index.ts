@@ -24,7 +24,10 @@ export type { VerifyParams, VerifyRootEntry } from './verify.js';
 // ClientSetup/BlockCount authenticity (see trustkey.ts's doc comment for
 // the threat this protects against: Firestore-level tampering with data
 // verifyProofResult's pairing check would otherwise trust unconditionally).
-export { verifyClientSetupSig, verifyBlockCountSig } from './trustkey.js';
+// parseTrustedKeyHex decodes the hex-encoded public key format published
+// out-of-band for each pinion-prover deployment into the raw bytes
+// PinionProverClientOptions.trustedKey / VerifyParams.trustedKey expect.
+export { verifyClientSetupSig, verifyBlockCountSig, parseTrustedKeyHex, TRUSTED_KEY_SIZE } from './trustkey.js';
 
 // Challenge construction
 export {

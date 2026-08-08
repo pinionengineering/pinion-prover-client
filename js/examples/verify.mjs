@@ -7,13 +7,17 @@
  * is only solvable by a party who actually has the block data, not just HTTP 200.
  *
  * Prerequisites:
- *   - A running pinion-prover server          → PROVER_URL
- *   - A JWT for the prover's authenticated API → PINION_TOKEN
- *   - At least one CID in the "pinned" state   → command-line arguments
+ *   - A running pinion-prover server              → PROVER_URL
+ *   - A JWT for the prover's authenticated API     → PINION_TOKEN
+ *   - The trusted public key for that deployment   → PROVER_TRUSTED_KEY
+ *     (hex-encoded Ed25519, published out-of-band; hydrogen and helium each
+ *     sign with their own keypair, see pinion.build/docs#tag-signing)
+ *   - At least one CID in the "pinned" state       → command-line arguments
  *
  * Usage:
  *   PROVER_URL=https://hydrogen.pinion.build/prover \
  *   PINION_TOKEN=eyJh...                            \
+ *   PROVER_TRUSTED_KEY=185c0993...                  \
  *   node examples/verify.mjs <cid> [cid ...]
  *
  * Setup phase (first run or when new CIDs are supplied):
@@ -27,19 +31,32 @@
  * Exit 0 = proof passed.  Exit 1 = proof failed or configuration error.
  */
 
-import { PinionProverClient, PinNotActiveError, ProverError } from '@pinionengineering/prover-client';
+import {
+  PinionProverClient,
+  PinNotActiveError,
+  ProverError,
+  parseTrustedKeyHex,
+} from '@pinionengineering/prover-client';
 
 // ---------------------------------------------------------------------------
 // Configuration
 // ---------------------------------------------------------------------------
 
-const PROVER_URL = process.env.PROVER_URL;
-const TOKEN      = process.env.PINION_TOKEN;
-const cids       = process.argv.slice(2).filter(a => !a.startsWith('-'));
+const PROVER_URL   = process.env.PROVER_URL;
+const TOKEN        = process.env.PINION_TOKEN;
+const TRUSTED_KEY  = process.env.PROVER_TRUSTED_KEY;
+const cids         = process.argv.slice(2).filter(a => !a.startsWith('-'));
 
 if (!PROVER_URL) {
   console.error('Error: PROVER_URL is required');
-  console.error('  PROVER_URL=https://... PINION_TOKEN=... node verify.mjs <cid>');
+  console.error('  PROVER_URL=https://... PINION_TOKEN=... PROVER_TRUSTED_KEY=... node verify.mjs <cid>');
+  process.exit(1);
+}
+if (!TRUSTED_KEY) {
+  console.error('Error: PROVER_TRUSTED_KEY is required');
+  console.error('  audit() cryptographically verifies the server\'s ClientSetup/BlockCount signatures');
+  console.error('  before trusting anything in them; this is the public half of that deployment\'s');
+  console.error('  signing key, published out-of-band, not fetched from the server itself.');
   process.exit(1);
 }
 if (cids.length === 0) {
@@ -53,6 +70,7 @@ if (cids.length === 0) {
 
 const client = new PinionProverClient(PROVER_URL, {
   getToken: async () => TOKEN ?? null,
+  trustedKey: parseTrustedKeyHex(TRUSTED_KEY),
 });
 
 // ---------------------------------------------------------------------------

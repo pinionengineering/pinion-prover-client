@@ -9,8 +9,12 @@
 package main
 
 import (
+	"context"
+	"crypto/ed25519"
+	"encoding/base64"
 	"encoding/json"
 	"fmt"
+	"log"
 	"os"
 	"time"
 
@@ -21,9 +25,10 @@ import (
 )
 
 const (
-	flagBaseURL  = "base-url"
-	flagState    = "state"
-	envProverURL = "PROVER_URL"
+	flagBaseURL    = "base-url"
+	flagState      = "state"
+	flagTrustedKey = "trusted-key"
+	envProverURL   = "PROVER_URL"
 )
 
 // clientState is the JSON state file schema.
@@ -65,8 +70,10 @@ then run commands in sequence to exercise the full proof flow.`,
 
 	rootCmd.PersistentFlags().String(flagBaseURL, "http://localhost:8766/prover", "prover service base URL (including the /prover path prefix)")
 	rootCmd.PersistentFlags().String(flagState, ".prover-state.json", "path to state file")
+	rootCmd.PersistentFlags().String(flagTrustedKey, "", "base64-encoded Ed25519 public key to verify ClientSetup/BlockCount signatures against (required for `audit`; matches whatever CHAL_KEY_SIGNING_KEY the target prover is running with)")
 	viper.BindPFlag(flagBaseURL, rootCmd.PersistentFlags().Lookup(flagBaseURL))
 	viper.BindPFlag(flagState, rootCmd.PersistentFlags().Lookup(flagState))
+	viper.BindPFlag(flagTrustedKey, rootCmd.PersistentFlags().Lookup(flagTrustedKey))
 	viper.BindEnv(flagBaseURL, envProverURL)
 	viper.AutomaticEnv()
 
@@ -535,5 +542,24 @@ func saveState(st clientState) {
 func apiBase() string { return viper.GetString(flagBaseURL) }
 
 func client() *proverclient.Client {
-	return proverclient.NewClient(apiBase())
+	// Empty token: this tool is for local dev testing, with auth typically
+	// bypassed via INSECURE_DEV_AUTH_USER_HINT (see the package doc
+	// comment), so no real token is needed -- just routes to pinion-prover's
+	// non-browser-session (/pat/v1) auth family.
+	base := apiBase()
+	opts := []proverclient.Option{
+		proverclient.WithAuthURL(base + "/pat/v1"),
+		proverclient.WithToken(func(context.Context) (string, error) { return "", nil }),
+	}
+	if keyStr := viper.GetString(flagTrustedKey); keyStr != "" {
+		pub, err := base64.StdEncoding.DecodeString(keyStr)
+		if err != nil {
+			log.Fatalf("--%s: invalid base64: %v", flagTrustedKey, err)
+		}
+		if len(pub) != ed25519.PublicKeySize {
+			log.Fatalf("--%s: must decode to %d bytes (an Ed25519 public key), got %d", flagTrustedKey, ed25519.PublicKeySize, len(pub))
+		}
+		opts = append(opts, proverclient.WithTrustedKey(ed25519.PublicKey(pub)))
+	}
+	return proverclient.NewClient(base, opts...)
 }

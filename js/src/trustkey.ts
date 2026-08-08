@@ -14,31 +14,28 @@
 
 import { ed25519 } from '@noble/curves/ed25519';
 
-/**
- * pinionChalKeyPublicKeyHex is the fixed Ed25519 public key pinion-prover
- * signs against. This is the actual root of trust: a value baked into this
- * package's published source, reviewed and versioned like any other code,
- * not fetched from pinion-prover itself at runtime -- fetching it
- * per-request would let whatever could tamper with ClientSetup/BlockCount
- * also tamper with the key used to check them, defeating the entire point.
- *
- * TODO(pinion-chalkey-signing): placeholder development key. Replace with
- * the real production public key before this protection is relied on, and
- * keep this comment until that's done. Must match pinion-prover-client's
- * go/trustkey.go byte-for-byte.
- */
-const PINION_CHALKEY_PUBLIC_KEY_HEX =
-  '4570328563453ac077277b233d99293d27b2057166f2bef397e4d60a84327ff8';
+/** Number of raw bytes in an Ed25519 public key. */
+export const TRUSTED_KEY_SIZE = 32;
 
-function hexToBytes(hex: string): Uint8Array {
+/**
+ * Decodes a hex-encoded Ed25519 public key (see PinionProverClientOptions.trustedKey),
+ * throwing if it isn't well-formed. Mirrors pinion-cli's pinionconfig.decodeEd25519PublicKeyHex
+ * and pinion-prover-client/go's testclient flag parsing, so the same key string works
+ * unchanged across every Pinion prover client.
+ */
+export function parseTrustedKeyHex(hex: string): Uint8Array {
+  if (!/^[0-9a-fA-F]*$/.test(hex) || hex.length % 2 !== 0) {
+    throw new Error(`invalid trusted key: not valid hex: ${hex}`);
+  }
   const out = new Uint8Array(hex.length / 2);
   for (let i = 0; i < out.length; i++) {
     out[i] = parseInt(hex.slice(i * 2, i * 2 + 2), 16);
   }
+  if (out.length !== TRUSTED_KEY_SIZE) {
+    throw new Error(`invalid trusted key: must decode to ${TRUSTED_KEY_SIZE} bytes (an Ed25519 public key), got ${out.length}`);
+  }
   return out;
 }
-
-const pinionChalKeyPublicKey = hexToBytes(PINION_CHALKEY_PUBLIC_KEY_HEX);
 
 // Domain tags and the frame() encoding below must match pinion-prover's
 // authsig.go and pinion-prover-client's go/trustkey.go byte-for-byte, or a
@@ -85,29 +82,49 @@ function beUint64(n: number): Uint8Array {
 }
 
 /**
- * Checks that sig authenticates (keyId, clientSetup) against the fixed
- * pinion trust key. false means the bytes cannot be trusted to have come
- * from pinion-prover's own CreateKey call unmodified -- callers must not
- * proceed to build a Challenger or run any verification with them.
+ * Checks that sig authenticates (keyId, clientSetup) against pubKey. false
+ * means the bytes cannot be trusted to have come from pinion-prover's own
+ * CreateKey call unmodified -- callers must not proceed to build a
+ * Challenger or run any verification with them.
+ *
+ * pubKey is the caller's responsibility, deliberately not something this
+ * package hardcodes or fetches on your behalf: it must come from something
+ * published and reviewed out-of-band (see PinionProverClientOptions.trustedKey),
+ * not from pinion-prover itself at request time -- fetching it from the same
+ * server whose claims you're trying to verify would let whatever could
+ * tamper with ClientSetup/BlockCount also tamper with the key used to check
+ * them, defeating the entire point.
  */
-export function verifyClientSetupSig(keyId: string, clientSetup: Uint8Array, sig: Uint8Array): boolean {
+export function verifyClientSetupSig(
+  pubKey: Uint8Array,
+  keyId: string,
+  clientSetup: Uint8Array,
+  sig: Uint8Array,
+): boolean {
   if (!sig || sig.length === 0) return false;
   const encoder = new TextEncoder();
   const payload = frame(CLIENT_SETUP_SIG_DOMAIN, encoder.encode(keyId), clientSetup);
   try {
-    return ed25519.verify(sig, payload, pinionChalKeyPublicKey);
+    return ed25519.verify(sig, payload, pubKey);
   } catch {
     return false;
   }
 }
 
 /**
- * Checks that sig authenticates (keyId, root, blockCount) against the fixed
- * pinion trust key. false means blockCount cannot be trusted -- in
- * particular, an attacker could shrink it to make a challenge trivially
- * satisfiable, so callers must not proceed to build challenge ids from it.
+ * Checks that sig authenticates (keyId, root, blockCount) against pubKey
+ * (see verifyClientSetupSig on where pubKey should come from). false means
+ * blockCount cannot be trusted -- in particular, an attacker could shrink it
+ * to make a challenge trivially satisfiable, so callers must not proceed to
+ * build challenge ids from it.
  */
-export function verifyBlockCountSig(keyId: string, root: string, blockCount: number, sig: Uint8Array): boolean {
+export function verifyBlockCountSig(
+  pubKey: Uint8Array,
+  keyId: string,
+  root: string,
+  blockCount: number,
+  sig: Uint8Array,
+): boolean {
   if (!sig || sig.length === 0) return false;
   const encoder = new TextEncoder();
   const payload = frame(
@@ -117,7 +134,7 @@ export function verifyBlockCountSig(keyId: string, root: string, blockCount: num
     beUint64(blockCount),
   );
   try {
-    return ed25519.verify(sig, payload, pinionChalKeyPublicKey);
+    return ed25519.verify(sig, payload, pubKey);
   } catch {
     return false;
   }
