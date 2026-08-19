@@ -134,8 +134,7 @@ async function main() {
     result = await client.audit(keyId, freshSetup, { roots: cids });
   } catch (err) {
     if (err instanceof PinNotActiveError) {
-      console.error(`\n[fail]  ${err.cid}`);
-      console.error('        This CID is no longer in "pinned" state on the server.');
+      console.error(`\n[fail]  ${err.message}`);
       console.error('        Re-pin it, then run this script again to re-tag.');
     } else if (err instanceof ProverError) {
       console.error(`\n[fail]  Server returned HTTP ${err.status}: ${err.body}`);

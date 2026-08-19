@@ -37,8 +37,8 @@ import {
   type G1Point,
 } from './bn254.js';
 import { base64ToBytes, blockHashG1, deriveIndicesAndCoeffs } from './challenge.js';
-import { verifyClientSetupSig, verifyBlockCountSig } from './trustkey.js';
-import type { WireClientSetup, WireChallenge, WireProof, ProofVerificationResult } from './types.js';
+import { verifyClientSetupSig, verifyBlockCountSig, verifyProofSig } from './trustkey.js';
+import type { WireClientSetup, WireProof, ProofVerificationResult } from './types.js';
 
 /** One root's authenticity inputs, checked before any pairing math runs. */
 export interface VerifyRootEntry {
@@ -85,15 +85,33 @@ export interface VerifyParams {
    */
   blockIds: Uint8Array[];
   /**
-   * The challenge string that was sent to POST /prove.
-   * This is buildChallenge()'s return value: base64(JSON(WireChallenge)).
+   * Random seed, blocks-sampled count, and total-blocks count from the
+   * self-contained ProveJobStatusResponse envelope (seed/c/n) -- everything
+   * DeriveChallenge needs, alongside blockIds, to reconstruct the same
+   * challenge indices/coefficients the server used. See VerifyParams'
+   * top-level doc comment.
    */
-  challenge: string;
+  seed: Uint8Array;
+  c: number;
+  n: number;
   /**
-   * Raw bytes from the POST /prove response body.
-   * Despite Content-Type: application/octet-stream, the body is JSON (WireProof).
+   * The roots field from the same ProveJobStatusResponse envelope, in the
+   * order the server returned them -- part of what proofSig authenticates.
+   */
+  proofRoots: string[];
+  /**
+   * Raw bytes from the ProveJobStatusResponse's proof field.
    */
   proofBytes: Uint8Array;
+  /**
+   * Authenticates (keyId, seed, c, n, proofRoots, proofBytes) against
+   * trustedKey -- see verifyProofSig in trustkey.ts. Checked before any
+   * pairing math runs, exactly like clientSetupSig/blockCountSig: a proof
+   * envelope with a missing or invalid signature cannot be trusted to be
+   * what pinion-prover actually computed, so evaluating the pairing
+   * equation against it would prove nothing.
+   */
+  proofSig?: Uint8Array;
 }
 
 /**
@@ -134,6 +152,29 @@ function checkSetupAuthenticity(params: VerifyParams): string | null {
 }
 
 /**
+ * Checks the proof envelope (keyId, seed, c, n, proofRoots, proofBytes)
+ * against pinion-prover's signing key. Returns a detail string on failure,
+ * or null if it checked out. Same fail-closed rule as checkSetupAuthenticity.
+ */
+function checkProofAuthenticity(params: VerifyParams): string | null {
+  if (
+    !verifyProofSig(
+      params.trustedKey,
+      params.keyId,
+      params.seed,
+      params.c,
+      params.n,
+      params.proofRoots,
+      params.proofBytes,
+      params.proofSig ?? new Uint8Array(0),
+    )
+  ) {
+    return `proof envelope failed authenticity check for key ${params.keyId}`;
+  }
+  return null;
+}
+
+/**
  * Cryptographically verify a storage proof returned by pinion-prover,
  * distinguishing a real pairing-equation failure from one that couldn't be
  * evaluated at all (malformed/truncated response, wrong shape, etc.) —
@@ -147,6 +188,10 @@ export function verifyProofResult(params: VerifyParams): ProofVerificationResult
   const authFailure = checkSetupAuthenticity(params);
   if (authFailure !== null) {
     return { verified: false, reason: 'untrusted-setup', detail: authFailure };
+  }
+  const proofAuthFailure = checkProofAuthenticity(params);
+  if (proofAuthFailure !== null) {
+    return { verified: false, reason: 'untrusted-proof', detail: proofAuthFailure };
   }
 
   let result: boolean;
@@ -177,18 +222,13 @@ export function verifyProof(params: VerifyParams): boolean {
 }
 
 function _verifyProof(params: VerifyParams): boolean {
-  const { clientSetup, blockIds, challenge, proofBytes } = params;
+  const { clientSetup, blockIds, seed, c, proofBytes } = params;
 
-  // 1. Decode the challenge to recover the seed used for derivation.
-  const wireChal = JSON.parse(
-    new TextDecoder().decode(base64ToBytes(challenge)),
-  ) as WireChallenge;
-  const seed = base64ToBytes(wireChal.seed);
-
-  // 2. Re-derive indices and coefficients deterministically.
+  // 1. Re-derive indices and coefficients deterministically from the
+  //    self-contained envelope's seed/c.
   //    Both sides (browser + server) run this on the same (seed, ids) to agree
   //    on which blocks were sampled without communicating the full index list.
-  const { indices, coeffs } = deriveIndicesAndCoeffs(seed, blockIds, wireChal.c);
+  const { indices, coeffs } = deriveIndicesAndCoeffs(seed, blockIds, c);
 
   // 3. Decode the proof (JSON despite the octet-stream content-type).
   const wireProof = JSON.parse(new TextDecoder().decode(proofBytes)) as WireProof;

@@ -19,6 +19,7 @@
 import { fileURLToPath } from 'url';
 import path from 'path';
 import fs from 'fs';
+import crypto from 'crypto';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const root = path.resolve(__dirname, '..');
@@ -27,27 +28,55 @@ const root = path.resolve(__dirname, '..');
 const {
   PinionProverClient,
   PinNotActiveError,
+  ChallengeTooLargeError,
+  ProverError,
   ProveFailedError,
   ProveTimeoutError,
   TagFailedError,
   TagTimeoutError,
   MalformedResponseError,
-  parseTrustedKeyHex,
 } = await import(path.join(root, 'dist/index.js'));
 
 const BASE_URL = 'https://test.invalid/prover';
 
-// Genuine Ed25519 signature over frame("pinion-chalkey-v1", "test-key",
-// <testdata/vectors.json's raw client_setup bytes>), computed once against
-// TEST_TRUSTED_KEY_HEX's private half -- see verify.test.mjs's identical
-// constants for how they were generated and why they're pasted here rather
-// than re-signed in JS. Every test below that reaches verifyProofResult's
-// authenticity gate uses this key ID, trusted key, and signature.
+// Signing keypair generated fresh every run via Node's native (OpenSSL-backed)
+// ed25519 implementation, independent of the @noble/curves implementation the
+// library itself uses to verify -- see verify.test.mjs's identical setup for
+// the full rationale. Every test below that reaches verifyProofResult's
+// authenticity gate uses this key ID and trusted key.
 const TEST_KEY_ID = 'test-key';
-const TEST_TRUSTED_KEY_HEX = '4570328563453ac077277b233d99293d27b2057166f2bef397e4d60a84327ff8';
-const TEST_TRUSTED_KEY = parseTrustedKeyHex(TEST_TRUSTED_KEY_HEX);
-const TEST_CLIENT_SETUP_SIG_B64 =
-  'nuQqBVQU9N6shvQ/qv/qplgYNERK4m0vczeC4wvp9hLWS/lbWAzFlOpIEu8J6unEUCF1YTRfX48mFAwvmuQ5AA==';
+const { publicKey: signPub, privateKey: signPriv } = crypto.generateKeyPairSync('ed25519');
+const TEST_TRUSTED_KEY = new Uint8Array(
+  Buffer.from(signPub.export({ format: 'jwk' }).x, 'base64url'),
+);
+function ed25519SignRaw(data) {
+  return new Uint8Array(crypto.sign(null, Buffer.from(data), signPriv));
+}
+const CLIENT_SETUP_SIG_DOMAIN = 'pinion-chalkey-v1';
+const PROOF_SIG_DOMAIN = 'pinion-proof-v1';
+function lenPrefixed(part) {
+  const out = new Uint8Array(4 + part.length);
+  new DataView(out.buffer).setUint32(0, part.length, false);
+  out.set(part, 4);
+  return out;
+}
+function frameLocal(domain, ...parts) {
+  const pieces = [lenPrefixed(new TextEncoder().encode(domain))];
+  for (const p of parts) pieces.push(lenPrefixed(p));
+  const total = pieces.reduce((n, p) => n + p.length, 0);
+  const out = new Uint8Array(total);
+  let offset = 0;
+  for (const p of pieces) {
+    out.set(p, offset);
+    offset += p.length;
+  }
+  return out;
+}
+function beUint64Local(n) {
+  const out = new Uint8Array(8);
+  new DataView(out.buffer).setBigUint64(0, BigInt(n), false);
+  return out;
+}
 
 // ---------------------------------------------------------------------------
 // fetch stub
@@ -62,7 +91,7 @@ async function withMockFetch(handler, fn) {
   const calls = [];
   const original = globalThis.fetch;
   globalThis.fetch = async (url, opts = {}) => {
-    const entry = { url: String(url), method: opts.method ?? 'GET' };
+    const entry = { url: String(url), method: opts.method ?? 'GET', headers: opts.headers ?? {} };
     calls.push(entry);
     return handler(entry, calls.length - 1);
   };
@@ -116,9 +145,13 @@ console.log('  Test 1 PASS: prove() submits once and returns immediately, no sta
 
 // ---------------------------------------------------------------------------
 // Test 2: prove() still throws PinNotActiveError synchronously on 409.
+// Mocks the real server envelope (ginmiddleware/apierror.Abort4xx:
+// {code, message, request_id}), not an invented {cid: ...} shape -- this
+// test previously mocked a body the real server never sends, which is
+// exactly how the parsing bug it's now guarding against went unnoticed.
 // ---------------------------------------------------------------------------
 await withMockFetch(
-  () => jsonResponse(409, { cid: 'bafyStale' }),
+  () => jsonResponse(409, { code: 'pin_not_active', message: 'the CID "bafyStale" is not currently in a pinned state; only pinned CIDs can be proved.' }),
   async () => {
     const client = new PinionProverClient(BASE_URL);
     let threw;
@@ -128,7 +161,7 @@ await withMockFetch(
       threw = e;
     }
     assert(threw instanceof PinNotActiveError, 'Test 2 FAILED: expected PinNotActiveError');
-    assert(threw.cid === 'bafyStale', 'Test 2 FAILED: cid not carried through');
+    assert(threw.message === 'the CID "bafyStale" is not currently in a pinned state; only pinned CIDs can be proved.', 'Test 2 FAILED: message not carried through');
   },
 );
 console.log('  Test 2 PASS: prove() throws PinNotActiveError on 409');
@@ -152,11 +185,11 @@ await withMockFetch(
     const client = new PinionProverClient(BASE_URL);
     const pollIntervalMs = 20;
     const start = Date.now();
-    const proofBytes = await client.waitForProve('job-3', { pollIntervalMs });
+    const result = await client.waitForProve('job-3', { pollIntervalMs });
     const elapsed = Date.now() - start;
     assert(calls.length === 3, `Test 3 FAILED: expected 3 polls, got ${calls.length}`);
     assert(
-      Buffer.from(proofBytes).toString() === 'hello-proof',
+      Buffer.from(result.proof, 'base64').toString() === 'hello-proof',
       'Test 3 FAILED: proof bytes not decoded correctly',
     );
     // 2 sleeps of pollIntervalMs between 3 polls.
@@ -205,10 +238,10 @@ await withMockFetch(
   },
   async (calls) => {
     const client = new PinionProverClient(BASE_URL);
-    const proofBytes = await client.waitForProve('job-5', { pollIntervalMs: 1 });
+    const result = await client.waitForProve('job-5', { pollIntervalMs: 1 });
     assert(calls.length === 51, `Test 5 FAILED: expected 51 polls, got ${calls.length}`);
     assert(
-      Buffer.from(proofBytes).toString() === 'finally-done',
+      Buffer.from(result.proof, 'base64').toString() === 'finally-done',
       'Test 5 FAILED: did not resolve with the eventual proof',
     );
   },
@@ -358,7 +391,33 @@ console.log('  Test 10 PASS: waitForTag() throws TagFailedError on tag-failed');
 // ---------------------------------------------------------------------------
 const vecPath = path.resolve(root, '..', 'testdata/vectors.json');
 const vec = JSON.parse(fs.readFileSync(vecPath, 'utf8'));
-const { parseClientSetup, base64ToBytes, verifyProofResult } = await import(path.join(root, 'dist/index.js'));
+const { parseClientSetup, base64ToBytes, decodeChallenge, verifyProofResult } =
+  await import(path.join(root, 'dist/index.js'));
+
+// Signed here (not hand-transcribed) once vec.client_setup's raw bytes are
+// available -- see the header comment for why a freshly generated keypair
+// signs everything at test-run time.
+const vecClientSetupRaw = base64ToBytes(vec.client_setup);
+const TEST_CLIENT_SETUP_SIG = ed25519SignRaw(
+  frameLocal(CLIENT_SETUP_SIG_DOMAIN, new TextEncoder().encode(TEST_KEY_ID), vecClientSetupRaw),
+);
+const vecDecodedChal = decodeChallenge(vec.challenge);
+const vecSeed = base64ToBytes(vecDecodedChal.seed);
+const vecProofRoots = ['bafyTestRoot'];
+function signVecProofBytes(pb) {
+  return ed25519SignRaw(
+    frameLocal(
+      PROOF_SIG_DOMAIN,
+      new TextEncoder().encode(TEST_KEY_ID),
+      vecSeed,
+      beUint64Local(vecDecodedChal.c),
+      beUint64Local(vecDecodedChal.n),
+      ...vecProofRoots.map((r) => new TextEncoder().encode(r)),
+      pb,
+    ),
+  );
+}
+const vecProofSig = signVecProofBytes(base64ToBytes(vec.proof));
 
 await withMockFetch(
   (call, i) => {
@@ -367,13 +426,22 @@ await withMockFetch(
     }
     // One non-terminal poll, then done with the real vector's proof.
     if (i === 1) return jsonResponse(200, { status: 'prove-running' });
-    return jsonResponse(200, { status: 'prove-done', proof: vec.proof });
+    return jsonResponse(200, {
+      status: 'prove-done',
+      proof: vec.proof,
+      key_id: TEST_KEY_ID,
+      seed: vecDecodedChal.seed,
+      c: vecDecodedChal.c,
+      n: vecDecodedChal.n,
+      roots: vecProofRoots,
+      sig: Buffer.from(vecProofSig).toString('base64'),
+    });
   },
   async (calls) => {
     const client = new PinionProverClient(BASE_URL);
     const blockIds = vec.block_ids.map(base64ToBytes);
-    const submission = await client.prove('key-real', ['bafyTestRoot'], vec.challenge);
-    const proofBytes = await client.waitForProve(submission.jobId, {
+    const submission = await client.prove('key-real', vecProofRoots, vec.challenge);
+    const result = await client.waitForProve(submission.jobId, {
       pollIntervalMs: 5,
       challenge: submission.challenge,
       roots: submission.roots,
@@ -383,14 +451,18 @@ await withMockFetch(
       trustedKey: TEST_TRUSTED_KEY,
       keyId: TEST_KEY_ID,
       clientSetup: parseClientSetup(vec.client_setup),
-      clientSetupRaw: base64ToBytes(vec.client_setup),
-      clientSetupSig: base64ToBytes(TEST_CLIENT_SETUP_SIG_B64),
+      clientSetupRaw: vecClientSetupRaw,
+      clientSetupSig: TEST_CLIENT_SETUP_SIG,
       rootEntries: [],
       blockIds,
-      challenge: vec.challenge,
-      proofBytes,
+      seed: base64ToBytes(result.seed),
+      c: result.c,
+      n: result.n,
+      proofRoots: result.roots,
+      proofBytes: base64ToBytes(result.proof),
+      proofSig: base64ToBytes(result.sig),
     });
-    assert(verification.verified === true, 'Test 11 FAILED: expected the real test-vector proof to verify');
+    assert(verification.verified === true, `Test 11 FAILED: expected the real test-vector proof to verify, got ${JSON.stringify(verification)}`);
   },
 );
 console.log('  Test 11 PASS: prove()+waitForProve() round-trip a real proof that verifies correctly');
@@ -399,10 +471,15 @@ console.log('  Test 11 PASS: prove()+waitForProve() round-trip a real proof that
 // Test 12: audit() plumbing. Confirms onStatus/pollIntervalMs actually
 // reach the underlying poll (the exact bug being fixed: audit() used to
 // pass zero options through to prove()) and that a bad proof is reported
-// as verification failure, not a crash. Uses a malformed proof rather than
-// the real vector, since audit() always builds its own randomly-seeded
-// challenge internally. Genuine crypto pass/fail coverage for the new
-// plumbing lives in Test 11 instead.
+// as verification failure, not a crash. Uses a malformed, unsigned proof
+// rather than the real vector, since audit() always builds its own
+// randomly-seeded challenge internally. Genuine crypto pass/fail coverage
+// for the new plumbing lives in Test 11 instead. With no sig field on the
+// mocked response, this now fails the proof-envelope authenticity gate
+// (untrusted-proof) before ever reaching parsing -- a stronger and more
+// realistic failure mode for "the server returned garbage" than the old
+// malformed-input path, since a real garbage response would have no valid
+// sig either.
 // ---------------------------------------------------------------------------
 await withMockFetch(
   (call, i) => {
@@ -413,8 +490,6 @@ await withMockFetch(
     if (i - 1 < sequence.length) {
       return jsonResponse(200, { status: sequence[i - 1] });
     }
-    // Garbage proof bytes: fails verification regardless of which challenge
-    // audit() happened to generate.
     const garbageB64 = Buffer.from('<html>502 Bad Gateway</html>').toString('base64');
     return jsonResponse(200, { status: 'prove-done', proof: garbageB64 });
   },
@@ -423,8 +498,8 @@ await withMockFetch(
     const clientSetup = parseClientSetup(vec.client_setup);
     const setup = {
       clientSetup,
-      clientSetupRaw: base64ToBytes(vec.client_setup),
-      clientSetupSig: base64ToBytes(TEST_CLIENT_SETUP_SIG_B64),
+      clientSetupRaw: vecClientSetupRaw,
+      clientSetupSig: TEST_CLIENT_SETUP_SIG,
       roots: [{ root: 'bafyTestRoot', blockIds: vec.block_ids.map(base64ToBytes), chunked: false }],
       totalBlocks: vec.block_ids.length,
     };
@@ -439,8 +514,8 @@ await withMockFetch(
     assert(statuses[2] === 'prove-done', 'Test 12 FAILED: final onStatus should be prove-done');
     assert(result.pass === false, 'Test 12 FAILED: a garbage proof must not pass');
     assert(
-      result.verification.reason === 'malformed-input',
-      `Test 12 FAILED: expected malformed-input, got ${JSON.stringify(result.verification)}`,
+      result.verification.reason === 'untrusted-proof',
+      `Test 12 FAILED: expected untrusted-proof, got ${JSON.stringify(result.verification)}`,
     );
   },
 );
@@ -476,8 +551,8 @@ console.log('  Test 13 PASS: a non-JSON 2xx submit body still throws MalformedRe
   const client = new PinionProverClient(BASE_URL); // no trustedKey
   const setup = {
     clientSetup: parseClientSetup(vec.client_setup),
-    clientSetupRaw: base64ToBytes(vec.client_setup),
-    clientSetupSig: base64ToBytes(TEST_CLIENT_SETUP_SIG_B64),
+    clientSetupRaw: vecClientSetupRaw,
+    clientSetupSig: TEST_CLIENT_SETUP_SIG,
     roots: [{ root: 'bafyTestRoot', blockIds: vec.block_ids.map(base64ToBytes), chunked: false }],
     totalBlocks: vec.block_ids.length,
   };
@@ -495,4 +570,92 @@ console.log('  Test 13 PASS: a non-JSON 2xx submit body still throws MalformedRe
 }
 console.log('  Test 14 PASS: audit() refuses to run without a configured trusted key');
 
-console.log(`\nAll ${testCount} assertions passed across 14 tests.\n`);
+// ---------------------------------------------------------------------------
+// Test 15: prove() throws ChallengeTooLargeError on a 400 with code
+// "challenge_too_large", and a 400 with a different code (e.g.
+// no_tagged_roots) stays a generic ProverError instead of being
+// misclassified just because it shares the status code.
+// ---------------------------------------------------------------------------
+await withMockFetch(
+  () => jsonResponse(400, { code: 'challenge_too_large', message: 'challenge samples 5000 blocks, exceeding the 1000-block-per-challenge limit; retry with a smaller challenge.' }),
+  async () => {
+    const client = new PinionProverClient(BASE_URL);
+    let threw;
+    try {
+      await client.prove('key-1', ['cidA'], 'chal-b64');
+    } catch (e) {
+      threw = e;
+    }
+    assert(threw instanceof ChallengeTooLargeError, 'Test 15 FAILED: expected ChallengeTooLargeError');
+    assert(/exceeding the 1000-block/.test(threw.message), 'Test 15 FAILED: message not carried through');
+  },
+);
+await withMockFetch(
+  () => jsonResponse(400, { code: 'no_tagged_roots', message: 'no roots were specified and this key has nothing tagged yet.' }),
+  async () => {
+    const client = new PinionProverClient(BASE_URL);
+    let threw;
+    try {
+      await client.prove('key-1', [], 'chal-b64');
+    } catch (e) {
+      threw = e;
+    }
+    assert(threw instanceof ProverError, 'Test 15 FAILED: expected ProverError for a differently-coded 400');
+    assert(!(threw instanceof ChallengeTooLargeError), 'Test 15 FAILED: no_tagged_roots must not be classified as ChallengeTooLargeError');
+  },
+);
+console.log('  Test 15 PASS: prove() throws ChallengeTooLargeError only for code=challenge_too_large on 400');
+
+// ---------------------------------------------------------------------------
+// Test 16: createShare() posts to /api/v1/share with the auth header and
+// returns the token.
+// ---------------------------------------------------------------------------
+await withMockFetch(
+  (call) => {
+    assert(
+      call.method === 'POST' && call.url.endsWith('/api/v1/share'),
+      'Test 16: unexpected call ' + JSON.stringify(call),
+    );
+    return jsonResponse(200, { token: 'tok-abc' });
+  },
+  async () => {
+    const client = new PinionProverClient(BASE_URL, { getToken: async () => 'jwt-1' });
+    const resp = await client.createShare('key-1', 'july logs', 3600);
+    assert(resp.token === 'tok-abc', 'Test 16 FAILED: token not returned');
+  },
+);
+console.log('  Test 16 PASS: createShare() posts to /api/v1/share and returns the token');
+
+// ---------------------------------------------------------------------------
+// Test 17: resolveShare() GETs /share/:token/resolve and works on a client
+// with no getToken configured at all (default getToken resolves to null) --
+// resolving a public share link must never require auth configuration.
+// ---------------------------------------------------------------------------
+await withMockFetch(
+  (call) => {
+    assert(
+      call.method === 'GET' && call.url.endsWith('/share/tok-abc/resolve'),
+      'Test 17: unexpected call ' + JSON.stringify(call),
+    );
+    assert(
+      call.headers.Authorization === undefined,
+      'Test 17 FAILED: resolveShare() must not send an Authorization header, got ' + call.headers.Authorization,
+    );
+    return jsonResponse(200, {
+      company_name: 'Acme Corp',
+      key_id: 'key-1',
+      client_setup: 'setup-b64',
+      roots: [{ root: 'bafyRoot', block_count: 4 }],
+      audit_count: 2,
+      blocks_audited: 8,
+    });
+  },
+  async () => {
+    const client = new PinionProverClient(BASE_URL); // no getToken configured
+    const resp = await client.resolveShare('tok-abc');
+    assert(resp.company_name === 'Acme Corp' && resp.key_id === 'key-1', 'Test 17 FAILED: response not returned');
+  },
+);
+console.log('  Test 17 PASS: resolveShare() GETs /share/:token/resolve with no auth configured');
+
+console.log(`\nAll ${testCount} assertions passed across 17 tests.\n`);

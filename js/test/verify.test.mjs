@@ -15,6 +15,7 @@ import { createRequire } from 'module';
 import { fileURLToPath } from 'url';
 import path from 'path';
 import fs from 'fs';
+import crypto from 'crypto';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const root = path.resolve(__dirname, '..');
@@ -32,30 +33,60 @@ const {
 
 // ---------------------------------------------------------------------------
 // Auth fields every VerifyParams object below needs, now that
-// verifyProofResult gates on ClientSetup/BlockCount authenticity (see
-// trustkey.ts) before running any pairing math.
+// verifyProofResult gates on ClientSetup/BlockCount/proof-envelope
+// authenticity (see trustkey.ts) before running any pairing math.
 //
-// TEST_TRUSTED_KEY_HEX is a throwaway Ed25519 keypair generated once for this
-// test fixture only (not a real hydrogen/helium key). TEST_CLIENT_SETUP_SIG_B64
-// is a genuine Ed25519 signature over frame("pinion-chalkey-v1", "test-key",
-// <this vector's raw client_setup bytes>), computed once with the private
-// half of that keypair and pasted here as a fixed value -- deliberately not
-// re-derived in JS at test time, since transcribing key material by hand
-// between languages is exactly the kind of thing that's easy to get subtly
-// wrong (an off-by-one byte still "looks right" and fails silently as a
-// verification mismatch). If the test vector or trusted key ever changes,
-// this must be regenerated the same way: sign with the matching private key
-// against the exact frame() bytes, not by editing this string directly.
+// The signing keypair is generated fresh every test run via Node's native
+// (OpenSSL-backed) ed25519 implementation -- independent of the @noble/curves
+// implementation the library itself uses to verify -- and used to sign both
+// ClientSetup and the proof envelope against the exact frame() byte layout.
+// This is a genuine cross-implementation round trip (OpenSSL signs, @noble
+// verifies) without the fragility of hand-transcribing a signature between
+// languages: regenerating these vectors never requires pasting a new
+// constant here.
 // ---------------------------------------------------------------------------
 const TEST_KEY_ID = 'test-key';
-const TEST_TRUSTED_KEY_HEX = '4570328563453ac077277b233d99293d27b2057166f2bef397e4d60a84327ff8';
-const TEST_TRUSTED_KEY = parseTrustedKeyHex(TEST_TRUSTED_KEY_HEX);
-const TEST_CLIENT_SETUP_SIG_B64 =
-  'nuQqBVQU9N6shvQ/qv/qplgYNERK4m0vczeC4wvp9hLWS/lbWAzFlOpIEu8J6unEUCF1YTRfX48mFAwvmuQ5AA==';
+const { publicKey: signPub, privateKey: signPriv } = crypto.generateKeyPairSync('ed25519');
+const TEST_TRUSTED_KEY = new Uint8Array(
+  Buffer.from(signPub.export({ format: 'jwk' }).x, 'base64url'),
+);
+function ed25519SignRaw(data) {
+  return new Uint8Array(crypto.sign(null, Buffer.from(data), signPriv));
+}
+const CLIENT_SETUP_SIG_DOMAIN = 'pinion-chalkey-v1';
+const PROOF_SIG_DOMAIN = 'pinion-proof-v1';
+function lenPrefixed(part) {
+  const out = new Uint8Array(4 + part.length);
+  new DataView(out.buffer).setUint32(0, part.length, false);
+  out.set(part, 4);
+  return out;
+}
+function frameLocal(domain, ...parts) {
+  const pieces = [lenPrefixed(new TextEncoder().encode(domain))];
+  for (const p of parts) pieces.push(lenPrefixed(p));
+  const total = pieces.reduce((n, p) => n + p.length, 0);
+  const out = new Uint8Array(total);
+  let offset = 0;
+  for (const p of pieces) {
+    out.set(p, offset);
+    offset += p.length;
+  }
+  return out;
+}
+function beUint64Local(n) {
+  const out = new Uint8Array(8);
+  new DataView(out.buffer).setBigUint64(0, BigInt(n), false);
+  return out;
+}
 // This vector's roots use raw block_ids, not block_count, so there is no
 // BlockCount to authenticate here -- see checkSetupAuthenticity's
 // "non-chunked: skip" branch in verify.ts.
 const rootEntries = [];
+// This vector never went through pinion-prover's HTTP roots-based flow (it's
+// a raw storage-proofs pipeline vector, no real root CIDs) -- a fixed
+// placeholder is fine, since it only needs to be used consistently between
+// signing and verifying here.
+const proofRoots = ['test-root'];
 
 // ---------------------------------------------------------------------------
 // Load test vectors
@@ -76,20 +107,51 @@ console.log(`  block_ids : ${vec.block_ids.length} blocks`);
 // ---------------------------------------------------------------------------
 const clientSetup = parseClientSetup(vec.client_setup);
 const clientSetupRaw = base64ToBytes(vec.client_setup);
-const clientSetupSig = base64ToBytes(TEST_CLIENT_SETUP_SIG_B64);
+const clientSetupSig = ed25519SignRaw(
+  frameLocal(CLIENT_SETUP_SIG_DOMAIN, new TextEncoder().encode(TEST_KEY_ID), clientSetupRaw),
+);
 const blockIds = vec.block_ids.map(base64ToBytes);
 const challenge = vec.challenge;       // pass as-is to verifyProof
 const proofBytes = base64ToBytes(vec.proof);
+const decodedChal = decodeChallenge(challenge);
+const seed = base64ToBytes(decodedChal.seed);
+const c = decodedChal.c;
+const n = decodedChal.n;
+function signProofBytes(pb) {
+  return ed25519SignRaw(
+    frameLocal(
+      PROOF_SIG_DOMAIN,
+      new TextEncoder().encode(TEST_KEY_ID),
+      seed,
+      beUint64Local(c),
+      beUint64Local(n),
+      ...proofRoots.map((r) => new TextEncoder().encode(r)),
+      pb,
+    ),
+  );
+}
+const proofSig = signProofBytes(proofBytes);
 
-// Every VerifyParams object below needs these four fields; keeping them in
-// one place means a future auth-scheme change only needs updating here, not
-// at every call site.
-const auth = { trustedKey: TEST_TRUSTED_KEY, keyId: TEST_KEY_ID, clientSetupRaw, clientSetupSig, rootEntries };
+// Every VerifyParams object below needs these fields; keeping them in one
+// place means a future auth-scheme change only needs updating here, not at
+// every call site.
+const auth = {
+  trustedKey: TEST_TRUSTED_KEY,
+  keyId: TEST_KEY_ID,
+  clientSetupRaw,
+  clientSetupSig,
+  rootEntries,
+  seed,
+  c,
+  n,
+  proofRoots,
+  proofSig,
+};
 
 // ---------------------------------------------------------------------------
 // Test 1: valid proof must pass
 // ---------------------------------------------------------------------------
-let passed = verifyProof({ ...auth, clientSetup, blockIds, challenge, proofBytes });
+let passed = verifyProof({ ...auth, clientSetup, blockIds, proofBytes });
 assert(passed === true, 'Test 1 FAILED: verifyProof should return true for a valid proof');
 console.log('  Test 1 PASS: valid proof accepted');
 
@@ -112,7 +174,6 @@ const tamperedPassed = verifyProof({
   ...auth,
   clientSetup,
   blockIds,
-  challenge,
   proofBytes: tamperedProofBytes,
 });
 assert(tamperedPassed === false, 'Test 2 FAILED: verifyProof should return false for tampered sigma');
@@ -130,7 +191,6 @@ const wrongIdsPassed = verifyProof({
   ...auth,
   clientSetup,
   blockIds: wrongIds,
-  challenge,
   proofBytes,
 });
 assert(wrongIdsPassed === false, 'Test 3 FAILED: verifyProof should return false for wrong block IDs');
@@ -154,7 +214,7 @@ const fakeVBytes = flipByte(realVBytes, 35);
 const badKeySetup = { ...clientSetup, v: toBase64(fakeVBytes) };
 let wrongKeyPassed;
 try {
-  wrongKeyPassed = verifyProof({ ...auth, clientSetup: badKeySetup, blockIds, challenge, proofBytes });
+  wrongKeyPassed = verifyProof({ ...auth, clientSetup: badKeySetup, blockIds, proofBytes });
 } catch {
   wrongKeyPassed = false;
 }
@@ -168,20 +228,25 @@ console.log('  Test 4 PASS: wrong public key rejected');
 // HTML error page, a truncated body) indistinguishable from genuine
 // evidence the server doesn't hold the data.
 // ---------------------------------------------------------------------------
+// The signature is computed over these exact garbage bytes (as an opaque
+// blob -- frame() doesn't care whether they parse as JSON), so this
+// isolates "envelope authenticity checks out, but the payload itself
+// doesn't parse as a valid proof" from an untrusted-envelope failure.
 const garbageProofBytes = new TextEncoder().encode('<html>502 Bad Gateway</html>');
+const garbageProofSig = signProofBytes(garbageProofBytes);
 const malformedResult = verifyProofResult({
   ...auth,
   clientSetup,
   blockIds,
-  challenge,
   proofBytes: garbageProofBytes,
+  proofSig: garbageProofSig,
 });
 assert(
   malformedResult.verified === false && malformedResult.reason === 'malformed-input',
-  'Test 5a FAILED: verifyProofResult should report malformed-input for an unparseable body',
+  `Test 5a FAILED: verifyProofResult should report malformed-input for an unparseable body, got ${JSON.stringify(malformedResult)}`,
 );
 assert(
-  verifyProof({ ...auth, clientSetup, blockIds, challenge, proofBytes: garbageProofBytes }) === false,
+  verifyProof({ ...auth, clientSetup, blockIds, proofBytes: garbageProofBytes, proofSig: garbageProofSig }) === false,
   'Test 5a FAILED: verifyProof should still return false for the same input (back-compat)',
 );
 console.log('  Test 5a PASS: malformed/unparseable proof body reported as malformed-input, not pairing-mismatch');
@@ -199,12 +264,16 @@ const swappedMu = [wireProof.mu[1], wireProof.mu[0], ...wireProof.mu.slice(2)];
 const scalarTamperedProofBytes = new TextEncoder().encode(
   JSON.stringify({ sigma: wireProof.sigma, mu: swappedMu }),
 );
+// Signed over these exact tampered bytes, same reasoning as garbageProofSig
+// above: isolates a genuine cryptographic mismatch from an untrusted-envelope
+// failure.
+const scalarTamperedProofSig = signProofBytes(scalarTamperedProofBytes);
 const mismatchResult = verifyProofResult({
   ...auth,
   clientSetup,
   blockIds,
-  challenge,
   proofBytes: scalarTamperedProofBytes,
+  proofSig: scalarTamperedProofSig,
 });
 assert(
   mismatchResult.verified === false && mismatchResult.reason === 'pairing-mismatch',
@@ -212,7 +281,7 @@ assert(
 );
 console.log('  Test 5b PASS: well-formed but cryptographically wrong proof reported as pairing-mismatch');
 
-const validResult = verifyProofResult({ ...auth, clientSetup, blockIds, challenge, proofBytes });
+const validResult = verifyProofResult({ ...auth, clientSetup, blockIds, proofBytes });
 assert(validResult.verified === true, 'Test 5c FAILED: verifyProofResult should report verified:true for a valid proof');
 console.log('  Test 5c PASS: valid proof reported as verified');
 
@@ -242,7 +311,6 @@ const tamperedSigResult = verifyProofResult({
   clientSetupSig: tamperedSig,
   clientSetup,
   blockIds,
-  challenge,
   proofBytes,
 });
 assert(
@@ -256,7 +324,6 @@ const missingSigResult = verifyProofResult({
   clientSetupSig: undefined,
   clientSetup,
   blockIds,
-  challenge,
   proofBytes,
 });
 assert(
@@ -270,7 +337,6 @@ const wrongKeyIdResult = verifyProofResult({
   keyId: 'a-different-key',
   clientSetup,
   blockIds,
-  challenge,
   proofBytes,
 });
 assert(
@@ -284,7 +350,6 @@ const tamperedRawResult = verifyProofResult({
   clientSetupRaw: new Uint8Array([...clientSetupRaw, 0]), // append a byte: still well-formed JSON prefix-wise for parseClientSetup, but different signed bytes
   clientSetup,
   blockIds,
-  challenge,
   proofBytes,
 });
 assert(
@@ -304,7 +369,6 @@ const wrongTrustedKeyResult = verifyProofResult({
   trustedKey: parseTrustedKeyHex(wrongTrustedKeyHex),
   clientSetup,
   blockIds,
-  challenge,
   proofBytes,
 });
 assert(
@@ -312,6 +376,52 @@ assert(
   'Test 7e FAILED: a genuine signature must not verify against a different trusted key',
 );
 console.log('  Test 7e PASS: signature does not verify against a different trusted key');
+
+// ---------------------------------------------------------------------------
+// Test 8: proof-envelope authenticity gate -- the same fail-closed rules as
+// Test 7, but for proofSig (key_id, seed, c, n, roots, proof) rather than
+// clientSetupSig.
+// ---------------------------------------------------------------------------
+const tamperedProofSig = new Uint8Array(proofSig);
+tamperedProofSig[0] ^= 0xFF;
+const tamperedProofSigResult = verifyProofResult({
+  ...auth,
+  proofSig: tamperedProofSig,
+  clientSetup,
+  blockIds,
+  proofBytes,
+});
+assert(
+  tamperedProofSigResult.verified === false && tamperedProofSigResult.reason === 'untrusted-proof',
+  `Test 8a FAILED: tampered proofSig should report untrusted-proof, got ${JSON.stringify(tamperedProofSigResult)}`,
+);
+console.log('  Test 8a PASS: tampered proofSig rejected as untrusted-proof');
+
+const missingProofSigResult = verifyProofResult({
+  ...auth,
+  proofSig: undefined,
+  clientSetup,
+  blockIds,
+  proofBytes,
+});
+assert(
+  missingProofSigResult.verified === false && missingProofSigResult.reason === 'untrusted-proof',
+  'Test 8b FAILED: a missing proofSig must be treated the same as a wrong one, not skipped',
+);
+console.log('  Test 8b PASS: missing proofSig rejected as untrusted-proof (fail closed, not skipped)');
+
+const substitutedRootsResult = verifyProofResult({
+  ...auth,
+  proofRoots: ['a-different-root'],
+  clientSetup,
+  blockIds,
+  proofBytes,
+});
+assert(
+  substitutedRootsResult.verified === false && substitutedRootsResult.reason === 'untrusted-proof',
+  'Test 8c FAILED: a genuine signature must not verify against a substituted roots list',
+);
+console.log('  Test 8c PASS: signature does not verify against a substituted roots list');
 
 // ---------------------------------------------------------------------------
 // Done

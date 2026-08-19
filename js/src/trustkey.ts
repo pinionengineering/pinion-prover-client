@@ -42,6 +42,7 @@ export function parseTrustedKeyHex(hex: string): Uint8Array {
 // genuine signature will fail to verify.
 const CLIENT_SETUP_SIG_DOMAIN = 'pinion-chalkey-v1';
 const BLOCK_COUNT_SIG_DOMAIN = 'pinion-blockcount-v1';
+const PROOF_SIG_DOMAIN = 'pinion-proof-v1';
 
 /**
  * frame concatenates parts with a domain tag and explicit 4-byte
@@ -133,6 +134,38 @@ export function verifyBlockCountSig(
     encoder.encode(root),
     beUint64(blockCount),
   );
+  try {
+    return ed25519.verify(sig, payload, pubKey);
+  } catch {
+    return false;
+  }
+}
+
+/**
+ * Checks that sig authenticates (keyId, seed, c, n, roots, proof) against
+ * pubKey (see verifyClientSetupSig on where pubKey should come from). false
+ * means the proof envelope cannot be trusted to be what pinion-prover
+ * actually computed -- in particular, seed/c/n/roots could have been
+ * substituted for ones the proof bytes don't actually correspond to,
+ * silently defeating verification. roots must be passed in the same order
+ * the server returned them, since frame is order-sensitive.
+ */
+export function verifyProofSig(
+  pubKey: Uint8Array,
+  keyId: string,
+  seed: Uint8Array,
+  c: number,
+  n: number,
+  roots: string[],
+  proof: Uint8Array,
+  sig: Uint8Array,
+): boolean {
+  if (!sig || sig.length === 0) return false;
+  const encoder = new TextEncoder();
+  const parts = [encoder.encode(keyId), seed, beUint64(c), beUint64(n)];
+  for (const r of roots) parts.push(encoder.encode(r));
+  parts.push(proof);
+  const payload = frame(PROOF_SIG_DOMAIN, ...parts);
   try {
     return ed25519.verify(sig, payload, pubKey);
   } catch {

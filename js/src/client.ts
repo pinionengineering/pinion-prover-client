@@ -24,12 +24,14 @@ import type {
   ChallengeKeyInfo,
   CreateKeyResponse,
   CreateKeyResult,
+  CreateShareResponse,
   ParsedSetup,
   ParsedRoot,
   ProveJobResponse,
   ProveJobStatusResponse,
   ProveSubmission,
   RawSetupResponse,
+  ShareResolveResponse,
   TagJobListEntry,
   TagJobListResponse,
   TagJobProgress,
@@ -298,6 +300,40 @@ export class PinionProverClient {
   }
 
   // ---------------------------------------------------------------------------
+  // Share links
+  // ---------------------------------------------------------------------------
+
+  /**
+   * Mint a public share-link token for keyId's whole verification set --
+   * every root currently tagged under it, resolved fresh whenever the
+   * resulting link is visited. Authenticated -- the account must own keyId.
+   * expiresInSeconds is optional; omitted or zero means the link never
+   * expires.
+   */
+  async createShare(
+    keyId: string,
+    description?: string,
+    expiresInSeconds?: number,
+  ): Promise<CreateShareResponse> {
+    return this.post<CreateShareResponse>('/api/v1/share', {
+      key_id: keyId,
+      description: description ?? '',
+      expires_in_seconds: expiresInSeconds ?? 0,
+    });
+  }
+
+  /**
+   * Resolve a share-link token into its display metadata, crypto setup,
+   * and live audit stats. Unauthenticated -- token possession is the only
+   * authorization this needs, so this works whether or not getToken was
+   * configured (the private get() helper already omits the Authorization
+   * header when getToken resolves to null).
+   */
+  async resolveShare(token: string): Promise<ShareResolveResponse> {
+    return this.get<ShareResolveResponse>(`/share/${encodeURIComponent(token)}/resolve`);
+  }
+
+  // ---------------------------------------------------------------------------
   // Audit phase
   // ---------------------------------------------------------------------------
 
@@ -339,8 +375,26 @@ export class PinionProverClient {
       body: JSON.stringify({ key_id: keyId, roots, challenge, challenge_id: challengeId ?? '' }),
     });
     if (resp.status === 409) {
+      // The server's error envelope is {code, message, request_id} (see
+      // ginmiddleware/apierror.Abort4xx) -- there's no separate "cid"
+      // field, message already names the CID in readable prose. Fall back
+      // to something non-empty if the body is somehow missing or doesn't
+      // match, so this never regresses to a blank message.
       const body = await resp.json().catch(() => ({})) as Record<string, unknown>;
-      throw new PinNotActiveError(String(body['cid'] ?? 'unknown'));
+      const msg = typeof body['message'] === 'string' && body['message'] ? body['message'] : `pin not active: ${JSON.stringify(body)}`;
+      throw new PinNotActiveError(msg);
+    }
+    if (resp.status === 400) {
+      // 400 is shared by several distinct failures (invalid_request_body,
+      // no_tagged_roots, invalid_protocol, challenge_too_large), so unlike
+      // the 409 case above, the status alone doesn't disambiguate -- check
+      // code before deciding this is a ChallengeTooLargeError rather than a
+      // generic ProverError.
+      const body = await resp.json().catch(() => ({})) as Record<string, unknown>;
+      if (body['code'] === 'challenge_too_large') {
+        throw new ChallengeTooLargeError(String(body['message'] ?? 'challenge too large'));
+      }
+      throw new ProverError(resp.status, JSON.stringify(body));
     }
     if (!resp.ok) {
       throw new ProverError(resp.status, await resp.text().catch(() => ''));
@@ -356,14 +410,15 @@ export class PinionProverClient {
 
   /**
    * Wait for a proof job started by prove() to reach a terminal state,
-   * polling proveStatus(jobId) on an interval. Returns the raw proof bytes.
+   * polling proveStatus(jobId) on an interval. Returns the full
+   * self-contained response envelope once "prove-done".
    *
    * There is no default deadline. This waits as long as the proof takes
    * unless options.signal is given and fires first, in which case it
    * throws ProveTimeoutError with the last-seen status. Throws
    * ProveFailedError if the job reaches "prove-failed".
    */
-  async waitForProve(jobId: string, options: WaitForProveOptions = {}): Promise<Uint8Array> {
+  async waitForProve(jobId: string, options: WaitForProveOptions = {}): Promise<ProveJobStatusResponse> {
     const pollIntervalMs = options.pollIntervalMs ?? 500;
     const status = await pollUntilTerminal({
       fetchStatus: () => this.proveStatus(jobId),
@@ -382,7 +437,7 @@ export class PinionProverClient {
     if (status.status === 'prove-failed') {
       throw new ProveFailedError(jobId, status.error ?? 'unknown error', options.challenge, options.roots);
     }
-    return base64ToBytes(status.proof ?? '');
+    return status;
   }
 
   /**
@@ -434,7 +489,7 @@ export class PinionProverClient {
     const challenge = buildChallenge(challengeSize, allBlockIds.length);
 
     const submission = await this.prove(keyId, targetRoots, challenge);
-    const proofBytes = await this.waitForProve(submission.jobId, {
+    const result = await this.waitForProve(submission.jobId, {
       pollIntervalMs: options.pollIntervalMs,
       signal: options.signal,
       challenge,
@@ -450,8 +505,12 @@ export class PinionProverClient {
       clientSetupSig: setup.clientSetupSig,
       rootEntries: rootEntries.map((r) => ({ root: r.root, blockCount: r.blockCount, blockCountSig: r.blockCountSig })),
       blockIds: allBlockIds,
-      challenge,
-      proofBytes,
+      seed: base64ToBytes(result.seed ?? ''),
+      c: result.c ?? 0,
+      n: result.n ?? 0,
+      proofRoots: result.roots ?? [],
+      proofBytes: base64ToBytes(result.proof ?? ''),
+      proofSig: result.sig ? base64ToBytes(result.sig) : undefined,
     });
 
     return {
@@ -632,13 +691,29 @@ export class MalformedResponseError extends Error {
 
 /**
  * Thrown by prove() when the server returns 409 because a pin is no longer
- * in the "pinned" lifecycle state.  The caller should refresh the key's setup
+ * in the "pinned" lifecycle state. message is the server's own explanation,
+ * which already names the offending CID in readable prose (the server's
+ * error envelope is {code, message, request_id} -- there's no separate cid
+ * field to pull out separately). The caller should refresh the key's setup
  * and deregister or re-tag the stale root.
  */
 export class PinNotActiveError extends Error {
-  constructor(public readonly cid: string) {
-    super(`pin ${cid} is not in pinned state`);
+  constructor(message: string) {
+    super(message);
     this.name = 'PinNotActiveError';
+  }
+}
+
+/**
+ * Thrown by prove() when the server returns 400 with code
+ * "challenge_too_large" because the challenge samples more blocks than the
+ * server's per-challenge limit (a compute-cost safety valve). The caller
+ * should retry with a smaller challenge.
+ */
+export class ChallengeTooLargeError extends Error {
+  constructor(message: string) {
+    super(message);
+    this.name = 'ChallengeTooLargeError';
   }
 }
 

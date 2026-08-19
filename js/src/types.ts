@@ -78,15 +78,27 @@ export interface ProveSubmission {
  *
  * `status` is one of "prove-queued" | "prove-running" | "prove-done" |
  * "prove-failed". `challenge_id` echoes the value from the original
- * request. `proof` is populated only once `status` is "prove-done" (the
- * same field ProveResponse used to return synchronously). `error` is
- * populated only once `status` is "prove-failed".
+ * request. `error` is populated only once `status` is "prove-failed".
+ *
+ * `proof` and the fields below it are populated only once `status` is
+ * "prove-done", and together form a self-contained envelope: `key_id`,
+ * `seed`, `c`, `n`, and `roots` are everything needed (beyond the account's
+ * public setup key) to independently rebuild the challenge and verify
+ * `proof`, and `sig` authenticates all of them together -- see
+ * verifyProofSig in trustkey.ts.
  */
 export interface ProveJobStatusResponse {
   status: string;
   challenge_id?: string;
-  proof?: string;
   error?: string;
+
+  proof?: string;
+  key_id?: string;
+  seed?: string; // base64
+  c?: number;
+  n?: number;
+  roots?: string[];
+  sig?: string; // base64
 }
 
 /**
@@ -310,6 +322,44 @@ export interface TagJobListResponse {
 }
 
 /**
+ * Body for POST /api/v1/share. The account must own keyId.
+ * expiresInSeconds is optional; omitted or zero means the link never
+ * expires.
+ */
+export interface CreateShareRequest {
+  key_id: string;
+  description?: string;
+  expires_in_seconds?: number;
+}
+
+/** Response from POST /api/v1/share. */
+export interface CreateShareResponse {
+  token: string;
+}
+
+/**
+ * Raw response from GET /share/:token/resolve. roots covers every root
+ * currently tagged under key_id -- the account's whole "verification set"
+ * under this key, reconstructed fresh at resolve time, not frozen at
+ * share-creation time. audit_count/blocks_audited/last_audited_at are
+ * likewise read fresh at resolve time. expires_at is absent when the link
+ * has no expiration.
+ */
+export interface ShareResolveResponse {
+  company_name: string;
+  description?: string;
+  key_id: string;
+  client_setup: string;
+  client_setup_sig?: string;
+  roots: RawTaggedRoot[];
+
+  audit_count: number;
+  blocks_audited: number;
+  last_audited_at?: string;
+  expires_at?: string;
+}
+
+/**
  * Result of verifyProofResult() (see verify.ts). Distinguishes a genuine
  * cryptographic failure from one that couldn't even be evaluated:
  *
@@ -332,15 +382,23 @@ export interface TagJobListResponse {
  *     ClientSetup/BlockCount this check was given cannot be trusted to be
  *     what pinion-prover's CreateKey/Tag calls actually produced, so
  *     evaluating the pairing equation against it would prove nothing.
+ *   - { verified: false, reason: 'untrusted-proof', detail } means the
+ *     pairing equation was never evaluated because the proof envelope
+ *     (key_id, seed, c, n, roots, proof) failed its authenticity check
+ *     against pinion-prover's signing key. This means the envelope cannot
+ *     be trusted to be what pinion-prover actually computed -- one of those
+ *     fields may have been substituted for ones the proof bytes don't
+ *     actually correspond to.
  *
- * verifyProof() collapses all three false cases into a plain `false`, which
+ * verifyProof() collapses all four false cases into a plain `false`, which
  * is why it's the deprecated, lower-fidelity option.
  */
 export type ProofVerificationResult =
   | { verified: true }
   | { verified: false; reason: 'pairing-mismatch' }
   | { verified: false; reason: 'malformed-input'; cause: unknown }
-  | { verified: false; reason: 'untrusted-setup'; detail: string };
+  | { verified: false; reason: 'untrusted-setup'; detail: string }
+  | { verified: false; reason: 'untrusted-proof'; detail: string };
 
 /** Result of a complete audit round (challenge → prove → cryptographic verify). */
 export interface AuditResult {

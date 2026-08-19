@@ -4,6 +4,7 @@ export {
   ProverError,
   MalformedResponseError,
   PinNotActiveError,
+  ChallengeTooLargeError,
   TagFailedError,
   TagTimeoutError,
   ProveFailedError,
@@ -79,6 +80,9 @@ export type {
   TagJobStatusResponse,
   TagJobListEntry,
   TagJobListResponse,
+  CreateShareRequest,
+  CreateShareResponse,
+  ShareResolveResponse,
   ProofVerificationResult,
   AuditResult,
 } from './types.js';
