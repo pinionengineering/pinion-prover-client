@@ -285,6 +285,39 @@ func (c *Client) Deregister(ctx context.Context, keyID, root string) error {
 }
 
 // ---------------------------------------------------------------------------
+// Share links
+// ---------------------------------------------------------------------------
+
+// CreateShare mints a public share token covering keyID's whole verification
+// set: every root currently tagged under it, resolved fresh whenever the
+// resulting link is visited. Authenticated -- the account must own keyID.
+// expiresInSeconds is optional; 0 means the link never expires.
+func (c *Client) CreateShare(ctx context.Context, keyID, description string, expiresInSeconds int64) (*CreateShareResponse, error) {
+	path, err := c.authPath("/share")
+	if err != nil {
+		return nil, err
+	}
+	var out CreateShareResponse
+	if err := c.post(ctx, path, CreateShareRequest{KeyID: keyID, Description: description, ExpiresInSeconds: expiresInSeconds}, &out); err != nil {
+		return nil, err
+	}
+	return &out, nil
+}
+
+// ResolveShare resolves a share token into its display metadata, crypto
+// setup, and live audit stats. Unauthenticated -- token possession is the
+// only authorization this needs, so this works on a Client with no
+// WithAuthURL/WithToken configured at all (same pattern as ProveStatus,
+// which hits the same unauthenticated route group).
+func (c *Client) ResolveShare(ctx context.Context, token string) (*ShareResolveResponse, error) {
+	var out ShareResolveResponse
+	if err := c.get(ctx, c.baseURL+"/share/"+pathEscape(token)+"/resolve", &out); err != nil {
+		return nil, err
+	}
+	return &out, nil
+}
+
+// ---------------------------------------------------------------------------
 // Audit phase
 // ---------------------------------------------------------------------------
 
@@ -323,6 +356,25 @@ func (c *Client) Prove(ctx context.Context, keyID string, roots []string, challe
 		}
 		return nil, &PinNotActiveError{Message: msg}
 	}
+	if resp.StatusCode == http.StatusBadRequest {
+		// 400 is shared by several distinct failures (invalid_request_body,
+		// no_tagged_roots, invalid_protocol, challenge_too_large), so unlike
+		// the 409 case above, the status alone doesn't disambiguate --
+		// check code before deciding this is a ChallengeTooLargeError
+		// rather than a generic ProverError.
+		var errBody struct {
+			Code    string `json:"code"`
+			Message string `json:"message"`
+		}
+		_ = json.Unmarshal(respBody, &errBody)
+		if errBody.Code == "challenge_too_large" {
+			msg := errBody.Message
+			if msg == "" {
+				msg = "challenge too large: " + string(respBody)
+			}
+			return nil, &ChallengeTooLargeError{Message: msg}
+		}
+	}
 	if resp.StatusCode != http.StatusAccepted {
 		return nil, &ProverError{Status: resp.StatusCode, Body: string(respBody)}
 	}
@@ -348,8 +400,8 @@ type WaitForProveOptions struct {
 }
 
 // WaitForProve polls GET /prove/:job_id until the job reaches a terminal
-// state, returning the raw proof bytes once "prove-done", or a
-// *ProveFailedError once "prove-failed".
+// state, returning the full self-contained response envelope once
+// "prove-done", or a *ProveFailedError once "prove-failed".
 //
 // There is no default deadline: WaitForProve waits as long as ctx allows,
 // since a proof round can legitimately take longer than any fixed ceiling
@@ -357,7 +409,7 @@ type WaitForProveOptions struct {
 // context.WithTimeout to bound the wait; a ctx deadline or cancellation
 // surfaces as ctx.Err() (check with errors.Is against
 // context.DeadlineExceeded/context.Canceled), not a special error type.
-func (c *Client) WaitForProve(ctx context.Context, jobID string, opts *WaitForProveOptions) ([]byte, error) {
+func (c *Client) WaitForProve(ctx context.Context, jobID string, opts *WaitForProveOptions) (*ProveJobStatusResponse, error) {
 	if opts == nil {
 		opts = &WaitForProveOptions{}
 	}
@@ -375,7 +427,7 @@ func (c *Client) WaitForProve(ctx context.Context, jobID string, opts *WaitForPr
 		}
 		switch status.Status {
 		case "prove-done":
-			return status.Proof, nil
+			return status, nil
 		case "prove-failed":
 			return nil, &ProveFailedError{JobID: jobID, Reason: status.Error, Challenge: opts.Challenge, Roots: opts.Roots}
 		}
@@ -474,7 +526,7 @@ func (c *Client) Audit(ctx context.Context, keyID string, setup *SetupResponse, 
 	if err != nil {
 		return nil, err
 	}
-	proof, err := c.WaitForProve(ctx, submission.JobID, &WaitForProveOptions{
+	result, err := c.WaitForProve(ctx, submission.JobID, &WaitForProveOptions{
 		PollInterval: opts.PollInterval,
 		Challenge:    chal,
 		Roots:        targetRoots,
@@ -483,8 +535,11 @@ func (c *Client) Audit(ctx context.Context, keyID string, setup *SetupResponse, 
 	if err != nil {
 		return nil, err
 	}
+	if !VerifyProofSig(c.trustedKey, result.KeyID, result.Seed, result.C, result.N, result.Roots, result.Proof, result.Sig) {
+		return nil, &UntrustedProofError{JobID: submission.JobID, Reason: "signature missing or invalid"}
+	}
 
-	ok2, err := validator.Verify(chal, line.Proof(proof))
+	ok2, err := validator.Verify(chal, line.Proof(result.Proof))
 	if err != nil {
 		return nil, fmt.Errorf("proverclient: verify: %w", err)
 	}

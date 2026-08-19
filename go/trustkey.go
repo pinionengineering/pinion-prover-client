@@ -35,6 +35,7 @@ func beUint64(n int) []byte {
 const (
 	clientSetupSigDomain = "pinion-chalkey-v1"
 	blockCountSigDomain  = "pinion-blockcount-v1"
+	proofSigDomain       = "pinion-proof-v1"
 )
 
 // VerifyClientSetupSig checks that sig authenticates (keyID, clientSetup)
@@ -68,6 +69,27 @@ func VerifyBlockCountSig(pubKey ed25519.PublicKey, keyID, root string, blockCoun
 		return false
 	}
 	return ed25519.Verify(pubKey, frame(blockCountSigDomain, []byte(keyID), []byte(root), beUint64(blockCount)), sig)
+}
+
+// VerifyProofSig checks that sig authenticates (keyID, seed, c, n, roots,
+// proof) against pubKey (see VerifyClientSetupSig on where pubKey should
+// come from). A false result means the proof envelope cannot be trusted to
+// be what pinion-prover actually computed -- in particular, seed/c/n/roots
+// could have been substituted for ones the proof bytes don't actually
+// correspond to, silently defeating verification. roots must be passed in
+// the same order the server framed them in (the order ProveJobStatusResponse
+// returned them), since frame is order-sensitive.
+func VerifyProofSig(pubKey ed25519.PublicKey, keyID string, seed []byte, c, n int, roots []string, proof, sig []byte) bool {
+	if len(sig) == 0 {
+		return false
+	}
+	parts := make([][]byte, 0, 4+len(roots)+1)
+	parts = append(parts, []byte(keyID), seed, beUint64(c), beUint64(n))
+	for _, r := range roots {
+		parts = append(parts, []byte(r))
+	}
+	parts = append(parts, proof)
+	return ed25519.Verify(pubKey, frame(proofSigDomain, parts...), sig)
 }
 
 // verifySetupAuthenticity gates Audit on both signature checks before it

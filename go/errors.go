@@ -43,6 +43,20 @@ func (e *PinNotActiveError) Error() string {
 	return e.Message
 }
 
+// ChallengeTooLargeError is returned by Prove when the server responds 400
+// with code "challenge_too_large" because the challenge samples more
+// blocks than the server's per-challenge limit (a compute-cost safety
+// valve, see pinion-prover's flagMaxChallengeBlocks). Message is the
+// server's own explanation, which already names both the requested count
+// and the limit; the caller should retry with a smaller challenge.
+type ChallengeTooLargeError struct {
+	Message string
+}
+
+func (e *ChallengeTooLargeError) Error() string {
+	return e.Message
+}
+
 // TagFailedError is returned by Tag when the async tag job reaches the
 // "tag-failed" state.
 type TagFailedError struct {
@@ -86,4 +100,20 @@ func (e *UntrustedSetupError) Error() string {
 		return fmt.Sprintf("pinion-prover: key %s: ClientSetup failed authenticity check: %s", e.KeyID, e.Reason)
 	}
 	return fmt.Sprintf("pinion-prover: key %s root %s: BlockCount failed authenticity check: %s", e.KeyID, e.Root, e.Reason)
+}
+
+// UntrustedProofError is returned by Audit when a ProveJobStatusResponse's
+// self-contained proof envelope (KeyID, Seed, C, N, Roots, Proof) doesn't
+// verify against the fixed pinion trust key (see trustkey.go). This means
+// the envelope cannot be trusted to be what pinion-prover actually computed
+// -- it may have been tampered with in transit or storage, or the server
+// was misconfigured without a signing key. Audit refuses to run
+// cryptographic verification against an unverified envelope.
+type UntrustedProofError struct {
+	JobID  string
+	Reason string
+}
+
+func (e *UntrustedProofError) Error() string {
+	return fmt.Sprintf("pinion-prover: prove job %s: proof envelope failed authenticity check: %s", e.JobID, e.Reason)
 }

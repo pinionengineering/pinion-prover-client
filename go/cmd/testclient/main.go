@@ -340,14 +340,14 @@ func proveCmd() *cobra.Command {
 			if err != nil {
 				return err
 			}
-			proof, err := c.WaitForProve(cmd.Context(), sub.JobID, nil)
+			result, err := c.WaitForProve(cmd.Context(), sub.JobID, nil)
 			if err != nil {
 				return err
 			}
 
-			st.Pending.Proof = proof
+			st.Pending.Proof = result.Proof
 			saveState(st)
-			fmt.Printf("proof received  bytes=%d\n", len(proof))
+			fmt.Printf("proof received  bytes=%d\n", len(result.Proof))
 			return nil
 		},
 	}

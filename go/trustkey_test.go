@@ -25,6 +25,17 @@ func testSignBlockCount(t *testing.T, priv ed25519.PrivateKey, keyID, root strin
 	return ed25519.Sign(priv, frame(blockCountSigDomain, []byte(keyID), []byte(root), beUint64(blockCount)))
 }
 
+func testSignProof(t *testing.T, priv ed25519.PrivateKey, keyID string, seed []byte, c, n int, roots []string, proof []byte) []byte {
+	t.Helper()
+	parts := make([][]byte, 0, 4+len(roots)+1)
+	parts = append(parts, []byte(keyID), seed, beUint64(c), beUint64(n))
+	for _, r := range roots {
+		parts = append(parts, []byte(r))
+	}
+	parts = append(parts, proof)
+	return ed25519.Sign(priv, frame(proofSigDomain, parts...))
+}
+
 func TestVerifyClientSetupSig_RoundTrip(t *testing.T) {
 	pub, priv := testChalKeySigningKeypair(t)
 	sig := testSignClientSetup(t, priv, "key-1", []byte("setup-bytes"))
@@ -70,5 +81,43 @@ func TestVerifyBlockCountSig_TamperedCountRejected(t *testing.T) {
 	sig := testSignBlockCount(t, priv, "key-1", "bafy-root", 42)
 	if VerifyBlockCountSig(pub, "key-1", "bafy-root", 1, sig) {
 		t.Fatal("expected a shrunk BlockCount to fail verification")
+	}
+}
+
+func TestVerifyProofSig_RoundTrip(t *testing.T) {
+	pub, priv := testChalKeySigningKeypair(t)
+	seed := []byte("seed-bytes")
+	roots := []string{"bafy-root-a", "bafy-root-b"}
+	proof := []byte("proof-bytes")
+	sig := testSignProof(t, priv, "key-1", seed, 5, 10, roots, proof)
+	if !VerifyProofSig(pub, "key-1", seed, 5, 10, roots, proof, sig) {
+		t.Fatal("expected valid signature to verify")
+	}
+}
+
+func TestVerifyProofSig_TamperedProofRejected(t *testing.T) {
+	pub, priv := testChalKeySigningKeypair(t)
+	seed := []byte("seed-bytes")
+	roots := []string{"bafy-root-a"}
+	sig := testSignProof(t, priv, "key-1", seed, 5, 10, roots, []byte("proof-bytes"))
+	if VerifyProofSig(pub, "key-1", seed, 5, 10, roots, []byte("different-bytes"), sig) {
+		t.Fatal("expected tampered proof bytes to fail verification")
+	}
+}
+
+func TestVerifyProofSig_TamperedRootsRejected(t *testing.T) {
+	pub, priv := testChalKeySigningKeypair(t)
+	seed := []byte("seed-bytes")
+	proof := []byte("proof-bytes")
+	sig := testSignProof(t, priv, "key-1", seed, 5, 10, []string{"bafy-root-a"}, proof)
+	if VerifyProofSig(pub, "key-1", seed, 5, 10, []string{"bafy-root-b"}, proof, sig) {
+		t.Fatal("expected a substituted root list to fail verification")
+	}
+}
+
+func TestVerifyProofSig_EmptyRejected(t *testing.T) {
+	pub, _ := testChalKeySigningKeypair(t)
+	if VerifyProofSig(pub, "key-1", []byte("seed"), 5, 10, []string{"bafy-root-a"}, []byte("proof"), nil) {
+		t.Fatal("expected empty signature to fail verification, not be treated as trusted")
 	}
 }

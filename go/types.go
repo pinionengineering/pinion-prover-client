@@ -128,6 +128,40 @@ type TagJobListResponse struct {
 	Jobs []TagJobListEntry `json:"jobs"`
 }
 
+// CreateShareRequest is the body for POST /share. The account must own
+// KeyID. ExpiresInSeconds is optional; omitted or zero means the link never
+// expires.
+type CreateShareRequest struct {
+	KeyID            string `json:"key_id"`
+	Description      string `json:"description,omitempty"`
+	ExpiresInSeconds int64  `json:"expires_in_seconds,omitempty"`
+}
+
+// CreateShareResponse is returned by POST /share.
+type CreateShareResponse struct {
+	Token string `json:"token"`
+}
+
+// ShareResolveResponse is returned by GET /share/:token/resolve. Roots
+// covers every root currently tagged under KeyID -- the account's whole
+// "verification set" under this key, reconstructed fresh at resolve time,
+// not frozen at share-creation time. AuditCount/BlocksAudited/
+// LastAuditedAt are likewise read fresh at resolve time. ExpiresAt is empty
+// when the link has no expiration.
+type ShareResolveResponse struct {
+	CompanyName    string       `json:"company_name"`
+	Description    string       `json:"description,omitempty"`
+	KeyID          string       `json:"key_id"`
+	ClientSetup    []byte       `json:"client_setup"`
+	ClientSetupSig []byte       `json:"client_setup_sig,omitempty"`
+	Roots          []TaggedRoot `json:"roots"`
+
+	AuditCount    int64  `json:"audit_count"`
+	BlocksAudited int64  `json:"blocks_audited"`
+	LastAuditedAt string `json:"last_audited_at,omitempty"`
+	ExpiresAt     string `json:"expires_at,omitempty"`
+}
+
 // RegisterRequest is the body for POST /register: used when the client has
 // tagged the data itself (Ateniese client-side flow) and wants to deposit
 // the prover-side material with the service.
@@ -164,11 +198,24 @@ type ProveSubmission struct {
 
 // ProveJobStatusResponse is returned by GET /prove/:job_id, unauthenticated
 // like POST /prove. Status is one of "prove-queued" | "prove-running" |
-// "prove-done" | "prove-failed". Proof is populated only once Status is
-// "prove-done". Error is populated only once Status is "prove-failed".
+// "prove-done" | "prove-failed". Error is populated only once Status is
+// "prove-failed".
+//
+// Proof and the fields below it are populated only once Status is
+// "prove-done", and together form a self-contained envelope: KeyID, Seed,
+// C, N, and Roots are everything needed (beyond the account's public setup
+// key) to independently rebuild the challenge and verify Proof, and Sig
+// authenticates all of them together -- see VerifyProofSig.
 type ProveJobStatusResponse struct {
 	Status      string `json:"status"`
 	ChallengeID string `json:"challenge_id,omitempty"`
-	Proof       []byte `json:"proof,omitempty"`
 	Error       string `json:"error,omitempty"`
+
+	Proof []byte   `json:"proof,omitempty"`
+	KeyID string   `json:"key_id,omitempty"`
+	Seed  []byte   `json:"seed,omitempty"`
+	C     int      `json:"c,omitempty"`
+	N     int      `json:"n,omitempty"`
+	Roots []string `json:"roots,omitempty"`
+	Sig   []byte   `json:"sig,omitempty"`
 }

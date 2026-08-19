@@ -298,6 +298,104 @@ func TestWaitForTag_CtxCancelIsPrompt(t *testing.T) {
 }
 
 // ---------------------------------------------------------------------------
+// Share links
+// ---------------------------------------------------------------------------
+
+func TestCreateShare_Success(t *testing.T) {
+	c := newTestServer(t, func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodPost || r.URL.Path != "/api/v1/share" {
+			t.Fatalf("unexpected request %s %s", r.Method, r.URL.Path)
+		}
+		var req CreateShareRequest
+		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+			t.Fatalf("decode request: %v", err)
+		}
+		if req.KeyID != "key-1" || req.Description != "july logs" || req.ExpiresInSeconds != 3600 {
+			t.Fatalf("unexpected request body: %+v", req)
+		}
+		writeJSON(w, http.StatusOK, CreateShareResponse{Token: "tok-abc"})
+	})
+
+	resp, err := c.CreateShare(context.Background(), "key-1", "july logs", 3600)
+	if err != nil {
+		t.Fatalf("CreateShare: %v", err)
+	}
+	if resp.Token != "tok-abc" {
+		t.Fatalf("unexpected token: %+v", resp)
+	}
+}
+
+func TestCreateShare_KeyNotFound(t *testing.T) {
+	c := newTestServer(t, func(w http.ResponseWriter, r *http.Request) {
+		writeJSON(w, http.StatusNotFound, map[string]string{"code": "key_not_found", "message": `no key exists with id "key-1" for this account; check the key_id and try again.`})
+	})
+
+	_, err := c.CreateShare(context.Background(), "key-1", "", 0)
+	var proverErr *ProverError
+	if !errors.As(err, &proverErr) || proverErr.Status != http.StatusNotFound {
+		t.Fatalf("expected *ProverError{Status: 404}, got %v (%T)", err, err)
+	}
+}
+
+func TestResolveShare_Success(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Header.Get("Authorization") != "" {
+			t.Fatalf("resolve must not send an Authorization header, got %q", r.Header.Get("Authorization"))
+		}
+		if r.Method != http.MethodGet || r.URL.Path != "/share/tok-abc/resolve" {
+			t.Fatalf("unexpected request %s %s", r.Method, r.URL.Path)
+		}
+		writeJSON(w, http.StatusOK, ShareResolveResponse{
+			CompanyName: "Acme Corp",
+			KeyID:       "key-1",
+			Roots:       []TaggedRoot{{Root: "bafyRoot", BlockCount: 4}},
+			AuditCount:  2,
+		})
+	}))
+	t.Cleanup(srv.Close)
+
+	// No WithAuthURL/WithToken at all -- resolving a public share link must
+	// not require any auth configuration.
+	c := NewClient(srv.URL)
+
+	resp, err := c.ResolveShare(context.Background(), "tok-abc")
+	if err != nil {
+		t.Fatalf("ResolveShare: %v", err)
+	}
+	if resp.CompanyName != "Acme Corp" || resp.KeyID != "key-1" || len(resp.Roots) != 1 || resp.AuditCount != 2 {
+		t.Fatalf("unexpected response: %+v", resp)
+	}
+}
+
+func TestResolveShare_InvalidToken(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"code": "invalid_share_token", "message": "this share link is invalid or malformed."})
+	}))
+	t.Cleanup(srv.Close)
+	c := NewClient(srv.URL)
+
+	_, err := c.ResolveShare(context.Background(), "garbage")
+	var proverErr *ProverError
+	if !errors.As(err, &proverErr) || proverErr.Status != http.StatusBadRequest {
+		t.Fatalf("expected *ProverError{Status: 400}, got %v (%T)", err, err)
+	}
+}
+
+func TestResolveShare_NotFound(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		writeJSON(w, http.StatusNotFound, map[string]string{"code": "share_not_found", "message": "this share link's content is no longer available."})
+	}))
+	t.Cleanup(srv.Close)
+	c := NewClient(srv.URL)
+
+	_, err := c.ResolveShare(context.Background(), "tok-gone")
+	var proverErr *ProverError
+	if !errors.As(err, &proverErr) || proverErr.Status != http.StatusNotFound {
+		t.Fatalf("expected *ProverError{Status: 404}, got %v (%T)", err, err)
+	}
+}
+
+// ---------------------------------------------------------------------------
 // Prove / WaitForProve
 // ---------------------------------------------------------------------------
 
@@ -345,6 +443,39 @@ func TestProve_PinNotActiveError(t *testing.T) {
 	}
 }
 
+func TestProve_ChallengeTooLargeError(t *testing.T) {
+	const msg = `challenge samples 5000 blocks, exceeding the 1000-block-per-challenge limit; retry with a smaller challenge.`
+	c := newTestServer(t, func(w http.ResponseWriter, r *http.Request) {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"code": "challenge_too_large", "message": msg})
+	})
+
+	_, err := c.Prove(context.Background(), "key-1", []string{"root-a"}, []byte("chal"), "")
+	var ctlErr *ChallengeTooLargeError
+	if !errors.As(err, &ctlErr) || ctlErr.Message != msg {
+		t.Fatalf("expected *ChallengeTooLargeError{Message: %q}, got %v (%T)", msg, err, err)
+	}
+}
+
+func TestProve_OtherBadRequestStaysGenericError(t *testing.T) {
+	// A 400 with a different code (e.g. no_tagged_roots) must not be
+	// misclassified as ChallengeTooLargeError just because it shares the
+	// status code.
+	const msg = `no roots were specified and this key has nothing tagged yet.`
+	c := newTestServer(t, func(w http.ResponseWriter, r *http.Request) {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"code": "no_tagged_roots", "message": msg})
+	})
+
+	_, err := c.Prove(context.Background(), "key-1", nil, []byte("chal"), "")
+	var proverErr *ProverError
+	if !errors.As(err, &proverErr) || proverErr.Status != http.StatusBadRequest {
+		t.Fatalf("expected *ProverError{Status: 400}, got %v (%T)", err, err)
+	}
+	var ctlErr *ChallengeTooLargeError
+	if errors.As(err, &ctlErr) {
+		t.Fatalf("no_tagged_roots must not be classified as ChallengeTooLargeError, got %v", ctlErr)
+	}
+}
+
 func TestProve_MalformedResponse(t *testing.T) {
 	c := newTestServer(t, func(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(http.StatusAccepted)
@@ -376,7 +507,7 @@ func TestWaitForProve_PollsToCompletion(t *testing.T) {
 
 	var seen []string
 	var mu sync.Mutex
-	proof, err := c.WaitForProve(context.Background(), "job-1", &WaitForProveOptions{
+	result, err := c.WaitForProve(context.Background(), "job-1", &WaitForProveOptions{
 		PollInterval: 10 * time.Millisecond,
 		OnStatus: func(status string) {
 			mu.Lock()
@@ -387,8 +518,8 @@ func TestWaitForProve_PollsToCompletion(t *testing.T) {
 	if err != nil {
 		t.Fatalf("WaitForProve: %v", err)
 	}
-	if string(proof) != "real-proof-bytes" {
-		t.Fatalf("unexpected proof: %q", proof)
+	if string(result.Proof) != "real-proof-bytes" {
+		t.Fatalf("unexpected proof: %q", result.Proof)
 	}
 	mu.Lock()
 	n := len(seen)
@@ -475,11 +606,15 @@ func TestAudit_RealCryptoPass(t *testing.T) {
 
 	type job struct {
 		proof []byte
+		seed  []byte
+		c, n  int
+		sig   []byte
 		polls int32
 	}
 	var mu sync.Mutex
 	jobs := make(map[string]*job)
 
+	targetRoots := []string{fx.setup.Roots[0].Root}
 	c := newTestServerWithTrustedKey(t, fx.pub, func(w http.ResponseWriter, r *http.Request) {
 		switch {
 		case r.Method == http.MethodPost && r.URL.Path == "/prove":
@@ -495,8 +630,19 @@ func TestAudit_RealCryptoPass(t *testing.T) {
 				w.WriteHeader(http.StatusInternalServerError)
 				return
 			}
+			var w2 struct {
+				Seed []byte `json:"seed"`
+				C    int    `json:"c"`
+				N    int    `json:"n"`
+			}
+			if err := json.Unmarshal(req.Challenge, &w2); err != nil {
+				t.Errorf("decode challenge wire fields: %v", err)
+				w.WriteHeader(http.StatusInternalServerError)
+				return
+			}
+			sig := testSignProof(t, fx.priv, "key-1", w2.Seed, w2.C, w2.N, targetRoots, proof)
 			mu.Lock()
-			jobs["job-real"] = &job{proof: proof}
+			jobs["job-real"] = &job{proof: proof, seed: w2.Seed, c: w2.C, n: w2.N, sig: sig}
 			mu.Unlock()
 			writeJSON(w, http.StatusAccepted, ProveJobResponse{JobID: "job-real"})
 		case r.Method == http.MethodGet && strings.HasPrefix(r.URL.Path, "/prove/"):
@@ -509,7 +655,10 @@ func TestAudit_RealCryptoPass(t *testing.T) {
 				writeJSON(w, http.StatusOK, ProveJobStatusResponse{Status: "prove-running"})
 				return
 			}
-			writeJSON(w, http.StatusOK, ProveJobStatusResponse{Status: "prove-done", Proof: j.proof})
+			writeJSON(w, http.StatusOK, ProveJobStatusResponse{
+				Status: "prove-done", Proof: j.proof,
+				KeyID: "key-1", Seed: j.seed, C: j.c, N: j.n, Roots: targetRoots, Sig: j.sig,
+			})
 		default:
 			w.WriteHeader(http.StatusNotFound)
 		}
@@ -517,7 +666,7 @@ func TestAudit_RealCryptoPass(t *testing.T) {
 
 	var onStatus []string
 	result, err := c.Audit(context.Background(), "key-1", fx.setup, "sw-pub", &AuditOptions{
-		Roots:         []string{fx.setup.Roots[0].Root},
+		Roots:         targetRoots,
 		ChallengeSize: 5,
 		PollInterval:  5 * time.Millisecond,
 		OnStatus: func(status string) {
