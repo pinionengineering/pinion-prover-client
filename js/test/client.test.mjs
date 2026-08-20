@@ -439,7 +439,8 @@ await withMockFetch(
   },
   async (calls) => {
     const client = new PinionProverClient(BASE_URL);
-    const blockIds = vec.block_ids.map(base64ToBytes);
+    const blockIdArr = vec.block_ids.map(base64ToBytes);
+    const blockIds = (i) => blockIdArr[i];
     const submission = await client.prove('key-real', vecProofRoots, vec.challenge);
     const result = await client.waitForProve(submission.jobId, {
       pollIntervalMs: 5,
@@ -500,7 +501,17 @@ await withMockFetch(
       clientSetup,
       clientSetupRaw: vecClientSetupRaw,
       clientSetupSig: TEST_CLIENT_SETUP_SIG,
-      roots: [{ root: 'bafyTestRoot', blockIds: vec.block_ids.map(base64ToBytes), chunked: false }],
+      roots: [
+        {
+          root: 'bafyTestRoot',
+          blockIds: (() => {
+            const arr = vec.block_ids.map(base64ToBytes);
+            return (i) => arr[i];
+          })(),
+          count: vec.block_ids.length,
+          chunked: false,
+        },
+      ],
       totalBlocks: vec.block_ids.length,
     };
     const statuses = [];

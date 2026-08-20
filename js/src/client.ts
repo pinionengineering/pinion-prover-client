@@ -206,7 +206,7 @@ export class PinionProverClient {
    * Fetch the setup document for a key: public key material and, per
    * registered root, either the block ID list (non-chunked protocols) or the
    * super-block count (chunked protocols: SW-Priv, SW-Pub). parseSetupResponse
-   * turns either into a uniform ParsedRoot.blockIds array.
+   * turns either into a uniform ParsedRoot.blockIds resolver.
    *
    * Call this once after tagging to obtain the ParsedSetup needed for auditing.
    * Re-call whenever you add or remove roots.
@@ -481,12 +481,13 @@ export class PinionProverClient {
     });
 
     // Concatenate block IDs across roots in the same order the server does
-    // in ipfs-storage-proofs/ipfsproof.go:NewChallengedList.
-    const allBlockIds = rootEntries.flatMap((r) => r.blockIds);
-    if (allBlockIds.length === 0) throw new Error('no blocks to audit');
+    // in ipfs-storage-proofs/ipfsproof.go:NewChallengedList, without
+    // materializing them (see combineBlockIds' doc comment).
+    const { total: totalBlockIds, blockIds: allBlockIds } = combineBlockIds(rootEntries);
+    if (totalBlockIds === 0) throw new Error('no blocks to audit');
 
-    const challengeSize = Math.max(1, Math.round((challengePct / 100) * allBlockIds.length));
-    const challenge = buildChallenge(challengeSize, allBlockIds.length);
+    const challengeSize = Math.max(1, Math.round((challengePct / 100) * totalBlockIds));
+    const challenge = buildChallenge(challengeSize, totalBlockIds);
 
     const submission = await this.prove(keyId, targetRoots, challenge);
     const result = await this.waitForProve(submission.jobId, {
@@ -801,23 +802,52 @@ export function parseSetupResponse(raw: RawSetupResponse): ParsedSetup {
   const roots: ParsedRoot[] = raw.roots.map((r) => {
     if (r.block_count !== undefined) {
       const rootBytes = CID.parse(r.root).bytes;
-      const blockIds = Array.from({ length: r.block_count }, (_, i) => superBlockId(rootBytes, i));
       return {
         root: r.root,
-        blockIds,
+        blockIds: (i: number) => superBlockId(rootBytes, i),
+        count: r.block_count,
         chunked: true,
         blockCount: r.block_count,
         blockCountSig: r.block_count_sig ? base64ToBytes(r.block_count_sig) : undefined,
       };
     }
+    // Non-chunked: block_ids is already one entry per real block, so
+    // decoding eagerly (unlike the chunked branch above) is fine -- this
+    // array can never approach the sizes that made lazy resolution
+    // necessary for super-blocks.
+    const decoded = (r.block_ids ?? []).map((id) => CID.parse(id).bytes);
     return {
       root: r.root,
-      blockIds: (r.block_ids ?? []).map((id) => CID.parse(id).bytes),
+      blockIds: (i: number) => decoded[i]!,
+      count: decoded.length,
       chunked: false,
     };
   });
 
-  const totalBlocks = roots.reduce((s, r) => s + r.blockIds.length, 0);
+  const totalBlocks = roots.reduce((s, r) => s + r.count, 0);
 
   return { clientSetup, clientSetupRaw, clientSetupSig, roots, totalBlocks };
+}
+
+/**
+ * Combine multiple roots' block-id resolvers into a single resolver over
+ * the concatenated position space, in the same order the server does in
+ * ipfs-storage-proofs/ipfsproof.go:NewChallengedList -- without ever
+ * materializing the combined id list into an array (see ParsedRoot.blockIds'
+ * doc comment for why that matters). Mirrors BuildCombinedIDs in
+ * pinion-prover-client/go/client.go.
+ */
+function combineBlockIds(rootEntries: ParsedRoot[]): { total: number; blockIds: (i: number) => Uint8Array } {
+  const offsets: number[] = [];
+  let total = 0;
+  for (const r of rootEntries) {
+    offsets.push(total);
+    total += r.count;
+  }
+  const blockIds = (pos: number): Uint8Array => {
+    let i = offsets.length - 1;
+    while (i > 0 && offsets[i]! > pos) i--;
+    return rootEntries[i]!.blockIds(pos - offsets[i]!);
+  };
+  return { total, blockIds };
 }

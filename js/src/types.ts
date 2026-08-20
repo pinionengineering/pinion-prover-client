@@ -140,14 +140,22 @@ export interface RawSetupResponse {
 export interface ParsedRoot {
   root: string;
   /**
-   * Ids ready to feed directly to buildChallenge()/verifyProof(), in order.
-   * For non-chunked protocols these are real per-block CID bytes; for chunked
-   * protocols (see `chunked` below) these are synthesized super-block ids
-   * (superBlockId(rootBytes, i) for i in [0, block_count)), opaque either way
-   * to buildChallenge()/verifyProof(), which only need byte-identity, not
+   * Resolves position i (in [0, count)) to its id, ready to feed directly
+   * to buildChallenge()/verifyProof(). For non-chunked protocols these are
+   * real per-block CID bytes, decoded eagerly since block_ids from the raw
+   * setup response is already small (one entry per real block); for
+   * chunked protocols (see `chunked` below) these are synthesized
+   * super-block ids (superBlockId(rootBytes, i) for i in [0, block_count)),
+   * computed lazily on each call rather than pre-materialized into an
+   * array -- for a root with millions of super-blocks, that
+   * materialization alone is what caused a real 2026-08-19 hydrogen
+   * incident on the equivalent server-side code. Opaque either way to
+   * buildChallenge()/verifyProof(), which only need byte-identity, not
    * meaning.
    */
-  blockIds: Uint8Array[];
+  blockIds: (i: number) => Uint8Array;
+  /** How many positions blockIds resolves for this root -- equals block_count when chunked, block_ids.length otherwise. */
+  count: number;
   /**
    * True if `blockIds` are synthesized super-block ids (chunked protocol:
    * SW-Priv, SW-Pub) rather than real per-block CIDs. Callers that need to

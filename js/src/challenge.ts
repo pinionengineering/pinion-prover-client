@@ -82,6 +82,67 @@ export function decodeChallenge(challengeBase64: string): WireChallenge {
 // Deterministic index + coefficient derivation
 // ---------------------------------------------------------------------------
 
+/** One candidate block position, ranked by its keyed hash. */
+interface Ranked {
+  pos: number;
+  rank: Uint8Array;
+}
+
+/**
+ * Bounded max-heap of the n smallest-rank candidates seen so far, keyed
+ * ascending by rank -- so the heap's root is always the *worst* (largest
+ * rank) of the n currently kept, letting deriveIndicesAndCoeffs decide in
+ * O(log n) whether each new candidate should displace it. Mirrors
+ * storage-proofs/line/chalderive.go's rankHeap exactly: after every
+ * candidate has been considered, the heap holds precisely the n globally
+ * smallest-rank candidates, the same set a full sort's first n entries
+ * would hold -- just without ever holding more than n at once.
+ */
+class RankHeap {
+  private readonly items: Ranked[] = [];
+
+  get size(): number {
+    return this.items.length;
+  }
+
+  /** The current worst (largest-rank) kept candidate. Only valid when size > 0. */
+  peekWorst(): Ranked {
+    return this.items[0]!;
+  }
+
+  push(item: Ranked): void {
+    this.items.push(item);
+    let i = this.items.length - 1;
+    while (i > 0) {
+      const parent = (i - 1) >> 1;
+      if (compareBytes(this.items[i]!.rank, this.items[parent]!.rank) <= 0) break;
+      [this.items[i], this.items[parent]] = [this.items[parent]!, this.items[i]!];
+      i = parent;
+    }
+  }
+
+  /** Replaces the root (the worst kept candidate) with item and re-heapifies. */
+  replaceWorst(item: Ranked): void {
+    this.items[0] = item;
+    let i = 0;
+    for (;;) {
+      const left = 2 * i + 1;
+      const right = 2 * i + 2;
+      let largest = i;
+      if (left < this.items.length && compareBytes(this.items[left]!.rank, this.items[largest]!.rank) > 0) largest = left;
+      if (right < this.items.length && compareBytes(this.items[right]!.rank, this.items[largest]!.rank) > 0) largest = right;
+      if (largest === i) break;
+      [this.items[i], this.items[largest]] = [this.items[largest]!, this.items[i]!];
+      i = largest;
+    }
+  }
+
+  /** Every kept item, sorted ascending by rank. */
+  sortedAscending(): Ranked[] {
+    return [...this.items].sort((a, b) => compareBytes(a.rank, b.rank));
+  }
+}
+
 /**
  * Re-derive the challenge indices and blinding coefficients from a seed.
  *
@@ -89,32 +150,51 @@ export function decodeChallenge(challengeBase64: string): WireChallenge {
  *
  *   idxKey   = HMAC-SHA256(seed, "indices")
  *   coeffKey = HMAC-SHA256(seed, "coeffs")
- *   rank[i]  = HMAC-SHA256(idxKey, ids[i])   → sort asc → first c positions
+ *   rank[i]  = HMAC-SHA256(idxKey, idAt(i))  → smallest c ranks, ascending
  *   coeff[t] = HMAC-SHA256(coeffKey, BE64(t)) mod BN254_ORDER
  *
  * Both challenger (browser) and prover (server) independently call this with
- * the same (seed, ids) to agree on which blocks to challenge without any
- * extra round-trip.
+ * the same (seed, total, idAt) to agree on which blocks to challenge
+ * without any extra round-trip.
+ *
+ * idAt resolves a candidate position to its identifier on demand and total
+ * is the candidate count, rather than requiring every identifier
+ * pre-materialized into one array: for a chunked-protocol root with
+ * millions of super-blocks, building that array just to find the c
+ * smallest-rank entries is what caused a real 2026-08-19 hydrogen
+ * incident on the equivalent server-side Go code this ports. The
+ * selection here still touches every one of the total candidates (that's
+ * inherent to "find the c smallest hashes out of total" regardless of
+ * algorithm), but never holds more than c of them in memory at once (see
+ * RankHeap).
  */
 export function deriveIndicesAndCoeffs(
   seed: Uint8Array,
-  ids: Uint8Array[],
+  total: number,
+  idAt: (i: number) => Uint8Array,
   c: number,
 ): { indices: number[]; coeffs: bigint[] } {
+  const n = Math.min(c, total);
   const idxKey = hmac(sha256, seed, textBytes('indices'));
   const coeffKey = hmac(sha256, seed, textBytes('coeffs'));
 
-  // Rank each block by HMAC(idxKey, id); sort ascending; take first c.
-  const ranked = ids.map((id, pos) => ({ pos, rank: hmac(sha256, idxKey, id) }));
-  ranked.sort((a, b) => compareBytes(a.rank, b.rank));
-  const indices = ranked.slice(0, c).map((r) => r.pos);
+  const heap = new RankHeap();
+  for (let i = 0; i < total; i++) {
+    const rank = hmac(sha256, idxKey, idAt(i));
+    if (heap.size < n) {
+      heap.push({ pos: i, rank });
+    } else if (compareBytes(rank, heap.peekWorst().rank) < 0) {
+      heap.replaceWorst({ pos: i, rank });
+    }
+  }
+  const indices = heap.sortedAscending().map((r) => r.pos);
 
   // Derive coefficients: HMAC(coeffKey, BigEndian(t)) mod order.
   // Go encodes t as a uint64 big-endian — 8 bytes.
   const tbuf = new Uint8Array(8);
   const tview = new DataView(tbuf.buffer);
   const coeffs: bigint[] = [];
-  for (let t = 0; t < c; t++) {
+  for (let t = 0; t < n; t++) {
     tview.setBigUint64(0, BigInt(t), false); // false = big-endian
     coeffs.push(bytesToBigInt(hmac(sha256, coeffKey, tbuf)) % BN254_ORDER);
   }

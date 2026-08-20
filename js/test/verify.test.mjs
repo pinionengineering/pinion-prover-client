@@ -110,7 +110,8 @@ const clientSetupRaw = base64ToBytes(vec.client_setup);
 const clientSetupSig = ed25519SignRaw(
   frameLocal(CLIENT_SETUP_SIG_DOMAIN, new TextEncoder().encode(TEST_KEY_ID), clientSetupRaw),
 );
-const blockIds = vec.block_ids.map(base64ToBytes);
+const blockIdArr = vec.block_ids.map(base64ToBytes);
+const blockIds = (i) => blockIdArr[i];
 const challenge = vec.challenge;       // pass as-is to verifyProof
 const proofBytes = base64ToBytes(vec.proof);
 const decodedChal = decodeChallenge(challenge);
@@ -186,7 +187,8 @@ console.log('  Test 2 PASS: tampered sigma rejected');
 // The challenge indices (derived from HMAC ranking) will then refer to different
 // IDs, producing a wrong H(λ‖id) and a failing pairing.
 // ---------------------------------------------------------------------------
-const wrongIds = blockIds.map((id) => new Uint8Array(id.length)); // all zeros
+const wrongIdArr = blockIdArr.map((id) => new Uint8Array(id.length)); // all zeros
+const wrongIds = (i) => wrongIdArr[i];
 const wrongIdsPassed = verifyProof({
   ...auth,
   clientSetup,

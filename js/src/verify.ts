@@ -79,11 +79,16 @@ export interface VerifyParams {
    */
   rootEntries: VerifyRootEntry[];
   /**
-   * Block IDs (CID.Bytes()) in TagList order, concatenated across all challenged
-   * roots in the same order as the roots array in the ProveRequest.
-   * These are the same byte slices stored in ParsedRoot.blockIds.
+   * Resolves a combined block position (in TagList order, concatenated
+   * across all challenged roots in the same order as the roots array in
+   * the ProveRequest -- see ParsedRoot.blockIds) to its identifier
+   * (CID.Bytes()) on demand, rather than requiring every position's
+   * identifier pre-materialized into one array: for a chunked-protocol
+   * root with millions of super-blocks, that materialization alone is
+   * what caused a real 2026-08-19 hydrogen incident on the equivalent
+   * server-side code. Only ever called with positions in [0, n).
    */
-  blockIds: Uint8Array[];
+  blockIds: (i: number) => Uint8Array;
   /**
    * Random seed, blocks-sampled count, and total-blocks count from the
    * self-contained ProveJobStatusResponse envelope (seed/c/n) -- everything
@@ -222,13 +227,13 @@ export function verifyProof(params: VerifyParams): boolean {
 }
 
 function _verifyProof(params: VerifyParams): boolean {
-  const { clientSetup, blockIds, seed, c, proofBytes } = params;
+  const { clientSetup, blockIds, seed, c, n, proofBytes } = params;
 
   // 1. Re-derive indices and coefficients deterministically from the
-  //    self-contained envelope's seed/c.
+  //    self-contained envelope's seed/c/n.
   //    Both sides (browser + server) run this on the same (seed, ids) to agree
   //    on which blocks were sampled without communicating the full index list.
-  const { indices, coeffs } = deriveIndicesAndCoeffs(seed, blockIds, c);
+  const { indices, coeffs } = deriveIndicesAndCoeffs(seed, n, blockIds, c);
 
   // 3. Decode the proof (JSON despite the octet-stream content-type).
   const wireProof = JSON.parse(new TextDecoder().decode(proofBytes)) as WireProof;
@@ -246,7 +251,7 @@ function _verifyProof(params: VerifyParams): boolean {
   for (let t = 0; t < indices.length; t++) {
     const idx = indices[t] ?? 0;
     const nu = coeffs[t] ?? 0n;
-    const term = g1ScalarMult(blockHashG1(name, blockIds[idx] ?? new Uint8Array()), nu);
+    const term = g1ScalarMult(blockHashG1(name, blockIds(idx)), nu);
     A = A === null ? term : g1Add(A, term);
   }
 
