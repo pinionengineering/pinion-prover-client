@@ -7,7 +7,7 @@ require (
 	github.com/joho/godotenv v1.5.1
 	github.com/multiformats/go-multihash v0.2.3
 	github.com/pinionengineering/ipfs-storage-proofs v0.0.0-20260723224208-0e7c0836275b
-	github.com/pinionengineering/storage-proofs v0.0.0-20260723224100-8788b65ebed6
+	github.com/pinionengineering/storage-proofs v0.0.0-20260820032827-3dd3ee4fb83d
 	github.com/spf13/cobra v1.10.2
 	github.com/spf13/viper v1.21.0
 )
@@ -42,5 +42,3 @@ require (
 	golang.org/x/text v0.37.0 // indirect
 	lukechampine.com/blake3 v1.4.1 // indirect
 )
-
-replace github.com/pinionengineering/storage-proofs => ../../storage-proofs
