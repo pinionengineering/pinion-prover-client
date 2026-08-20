@@ -546,7 +546,7 @@ func (c *Client) Audit(ctx context.Context, keyID string, setup *SetupResponse, 
 
 	return &AuditResult{
 		Pass:          ok2,
-		BlocksChecked: total,
+		BlocksChecked: min(chalSize, total),
 		KeyID:         keyID,
 		Roots:         targetRoots,
 		Challenge:     chal,
