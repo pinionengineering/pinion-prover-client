@@ -42,3 +42,5 @@ require (
 	golang.org/x/text v0.37.0 // indirect
 	lukechampine.com/blake3 v1.4.1 // indirect
 )
+
+replace github.com/pinionengineering/storage-proofs => ../../storage-proofs

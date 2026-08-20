@@ -501,11 +501,11 @@ func (c *Client) Audit(ctx context.Context, keyID string, setup *SetupResponse, 
 		return nil, err
 	}
 
-	combinedIDs, err := BuildCombinedIDs(setup, targetRoots)
+	total, idAt, err := BuildCombinedIDs(setup, targetRoots)
 	if err != nil {
 		return nil, err
 	}
-	if len(combinedIDs) == 0 {
+	if total == 0 {
 		return nil, fmt.Errorf("proverclient: no blocks to audit for roots %v", targetRoots)
 	}
 
@@ -517,7 +517,7 @@ func (c *Client) Audit(ctx context.Context, keyID string, setup *SetupResponse, 
 	if err != nil {
 		return nil, fmt.Errorf("proverclient: new challenger: %w", err)
 	}
-	chal, validator, err := challenger.Challenge(combinedIDs)
+	chal, validator, err := challenger.Challenge(total, idAt)
 	if err != nil {
 		return nil, fmt.Errorf("proverclient: generate challenge: %w", err)
 	}
@@ -546,7 +546,7 @@ func (c *Client) Audit(ctx context.Context, keyID string, setup *SetupResponse, 
 
 	return &AuditResult{
 		Pass:          ok2,
-		BlocksChecked: len(combinedIDs),
+		BlocksChecked: total,
 		KeyID:         keyID,
 		Roots:         targetRoots,
 		Challenge:     chal,
@@ -572,44 +572,87 @@ func SchemeByProtocol(protocol string) (*capability.SchemeSpec, bool) {
 }
 
 // BuildCombinedIDs builds the challenge ids for targetRoots from a
-// SetupResponse. For chunked protocols (BlockCount > 0), ids are
-// rootCID||localIndex, constructed entirely client-side via
-// ipfsproof.SuperBlockID; no manifest needed beyond the root CID and the
-// block count already in setup. For CID-addressed protocols, ids are the
-// real block CIDs in BlockIDs. Roots from different protocols/roots can be
-// combined in one call: this is what lets a single challenge span multiple
-// independently-tagged pinned files.
-func BuildCombinedIDs(setup *SetupResponse, targetRoots []string) ([][]byte, error) {
+// SetupResponse, resolved lazily: total is the combined candidate count
+// across all targetRoots, idAt resolves position i to its identifier on
+// demand rather than requiring every position's identifier materialized
+// into memory up front. For chunked protocols (BlockCount > 0), ids are
+// rootCID||localIndex, computed via ipfsproof.SuperBlockID; no manifest
+// needed beyond the root CID and the block count already in setup. For
+// CID-addressed protocols, ids are the real block CIDs in BlockIDs,
+// decoded once (BlockIDs is already small -- one entry per real block, not
+// a virtualized super-block count). Roots from different protocols/roots
+// can be combined in one call: this is what lets a single challenge span
+// multiple independently-tagged pinned files.
+//
+// A caller that needs to persist the exact candidate set across a process
+// boundary (e.g. a CLI splitting "mint a challenge" and "verify its proof"
+// into separate invocations, deliberately not re-deriving from a possibly
+// since-changed live SetupResponse) should resolve and store its own
+// []byte snapshot up front rather than trying to serialize idAt itself --
+// see pinion-cli's proverstate.Pending for a worked example of that
+// tradeoff. Most callers, including Audit, only need (total, idAt) for the
+// lifetime of one process and should prefer this lazy form: for a
+// chunked-protocol root with millions of super-blocks, materializing every
+// identifier just to build one challenge is what caused a real 2026-08-19
+// hydrogen incident on the server side of this exact code path.
+func BuildCombinedIDs(setup *SetupResponse, targetRoots []string) (int, func(int) []byte, error) {
 	byRoot := make(map[string]TaggedRoot, len(setup.Roots))
 	for _, r := range setup.Roots {
 		byRoot[r.Root] = r
 	}
 
-	var combined [][]byte
-	for _, r := range targetRoots {
+	type resolvedRoot struct {
+		root       cid.Cid  // valid only when chunked
+		chunked    bool
+		blockCount int      // valid only when chunked
+		blockIDs   [][]byte // valid only when not chunked
+	}
+	resolved := make([]resolvedRoot, len(targetRoots))
+	offsets := make([]int, len(targetRoots))
+	total := 0
+	for i, r := range targetRoots {
 		info, ok := byRoot[r]
 		if !ok {
-			return nil, fmt.Errorf("proverclient: root %s not in setup", r)
+			return 0, nil, fmt.Errorf("proverclient: root %s not in setup", r)
 		}
+		offsets[i] = total
 		if info.BlockCount > 0 {
 			root, err := cid.Decode(r)
 			if err != nil {
-				return nil, fmt.Errorf("proverclient: decode root CID %s: %w", r, err)
+				return 0, nil, fmt.Errorf("proverclient: decode root CID %s: %w", r, err)
 			}
-			for i := 0; i < info.BlockCount; i++ {
-				combined = append(combined, ipfsproof.SuperBlockID(root, uint64(i)))
-			}
+			resolved[i] = resolvedRoot{root: root, chunked: true, blockCount: info.BlockCount}
+			total += info.BlockCount
 			continue
 		}
-		for _, cidStr := range info.BlockIDs {
+		blockIDs := make([][]byte, len(info.BlockIDs))
+		for j, cidStr := range info.BlockIDs {
 			bc, err := cid.Decode(cidStr)
 			if err != nil {
-				return nil, fmt.Errorf("proverclient: decode block CID %s: %w", cidStr, err)
+				return 0, nil, fmt.Errorf("proverclient: decode block CID %s: %w", cidStr, err)
 			}
-			combined = append(combined, bc.Bytes())
+			blockIDs[j] = bc.Bytes()
 		}
+		resolved[i] = resolvedRoot{blockIDs: blockIDs}
+		total += len(blockIDs)
 	}
-	return combined, nil
+
+	idAt := func(pos int) []byte {
+		// offsets is one entry per root (a handful in practice, never per
+		// block), so a linear scan from the end is simpler than a binary
+		// search and plenty fast.
+		i := len(offsets) - 1
+		for i > 0 && offsets[i] > pos {
+			i--
+		}
+		r := resolved[i]
+		local := pos - offsets[i]
+		if r.chunked {
+			return ipfsproof.SuperBlockID(r.root, uint64(local))
+		}
+		return r.blockIDs[local]
+	}
+	return total, idAt, nil
 }
 
 // ---------------------------------------------------------------------------

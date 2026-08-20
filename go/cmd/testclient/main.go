@@ -294,7 +294,7 @@ func challengeCmd() *cobra.Command {
 				return fmt.Errorf("specify --root or --all")
 			}
 
-			combinedIDs, err := proverclient.BuildCombinedIDs(stateToSetup(st), targetRoots)
+			total, idAt, err := proverclient.BuildCombinedIDs(stateToSetup(st), targetRoots)
 			if err != nil {
 				return err
 			}
@@ -307,7 +307,7 @@ func challengeCmd() *cobra.Command {
 			if err != nil {
 				return fmt.Errorf("new challenger: %w", err)
 			}
-			chal, _, err := challenger.Challenge(combinedIDs)
+			chal, _, err := challenger.Challenge(total, idAt)
 			if err != nil {
 				return fmt.Errorf("generate challenge: %w", err)
 			}
@@ -315,7 +315,7 @@ func challengeCmd() *cobra.Command {
 			st.Pending = &pendingState{Challenge: chal, Roots: targetRoots}
 			saveState(st)
 			fmt.Printf("challenge generated  roots=%d  blocks=%d  bytes=%d\n",
-				len(targetRoots), len(combinedIDs), len(chal))
+				len(targetRoots), total, len(chal))
 			return nil
 		},
 	}
@@ -363,7 +363,7 @@ func verifyCmd() *cobra.Command {
 				return fmt.Errorf("no pending proof: run prove first")
 			}
 
-			combinedIDs, err := proverclient.BuildCombinedIDs(stateToSetup(st), st.Pending.Roots)
+			total, idAt, err := proverclient.BuildCombinedIDs(stateToSetup(st), st.Pending.Roots)
 			if err != nil {
 				return err
 			}
@@ -376,7 +376,7 @@ func verifyCmd() *cobra.Command {
 			if err != nil {
 				return fmt.Errorf("new challenger: %w", err)
 			}
-			_, validator, err := challenger.Challenge(combinedIDs)
+			_, validator, err := challenger.Challenge(total, idAt)
 			if err != nil {
 				return fmt.Errorf("recreate challenge: %w", err)
 			}
