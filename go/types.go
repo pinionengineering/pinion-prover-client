@@ -96,9 +96,19 @@ type TagSubmission struct {
 }
 
 // TagJobProgress reports how much of an in-flight tag job has completed.
+// NodesWalked/BytesWalked cover the DAG-walk planning phase, before
+// TotalBlocks is even known -- both zero once TotalBlocks becomes nonzero.
+// EstimatedTotalBytes, looked up once server-side from the pin's own
+// recorded size, lets a client render BytesWalked/EstimatedTotalBytes as a
+// percentage during that phase; it's an estimate, not exact, since it comes
+// from a different size computation than BytesWalked's own sum, and may be
+// absent if the size lookup failed.
 type TagJobProgress struct {
-	TotalBlocks     int `json:"total_blocks"`
-	CompletedBlocks int `json:"completed_blocks"`
+	TotalBlocks         int    `json:"total_blocks"`
+	CompletedBlocks     int    `json:"completed_blocks"`
+	NodesWalked         int    `json:"nodes_walked,omitempty"`
+	BytesWalked         uint64 `json:"bytes_walked,omitempty"`
+	EstimatedTotalBytes uint64 `json:"estimated_total_bytes,omitempty"`
 }
 
 // TagJobStatusResponse is returned by GET /tag/:job_id. Status is one of

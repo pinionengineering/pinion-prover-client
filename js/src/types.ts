@@ -284,10 +284,23 @@ export interface TagSubmission {
   keyId: string;
 }
 
-/** How much of an in-flight tag job has completed. */
+/**
+ * How much of an in-flight tag job has completed.
+ *
+ * `nodes_walked`/`bytes_walked` cover the DAG-walk planning phase, before
+ * `total_blocks` is even known -- both zero once `total_blocks` becomes
+ * nonzero. `estimated_total_bytes` is the pin's own recorded size, looked up
+ * once server-side, for rendering `bytes_walked / estimated_total_bytes` as
+ * a percentage during that phase; it's an estimate, not exact (comes from a
+ * different size computation than `bytes_walked`'s own sum), and may be
+ * absent if the size lookup failed.
+ */
 export interface TagJobProgress {
   total_blocks: number;
   completed_blocks: number;
+  nodes_walked?: number;
+  bytes_walked?: number;
+  estimated_total_bytes?: number;
 }
 
 /**
