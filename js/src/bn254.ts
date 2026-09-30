@@ -96,9 +96,17 @@ export function g2FromBytes(bytes: Uint8Array): G2Point {
 // G1 arithmetic
 // ---------------------------------------------------------------------------
 
-/** Scalar-multiply a G1 point: returns k·P. */
+/**
+ * Scalar-multiply a G1 point: returns k·P for any k in [0, r).
+ *
+ * k = 0 is a legitimate input during verification (a μⱼ over sectors that
+ * are zero in every challenged block) and yields the identity. noble's
+ * multiply() rejects 0, so this uses multiplyUnsafe(), which accepts it.
+ * multiplyUnsafe() is not constant-time; verification only handles public
+ * values, so timing leaks nothing.
+ */
 export function g1ScalarMult(P: G1Point, k: bigint): G1Point {
-  return P.multiply(k);
+  return P.multiplyUnsafe(k);
 }
 
 /** Add two G1 points. */

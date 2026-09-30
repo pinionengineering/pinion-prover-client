@@ -318,8 +318,9 @@ Convenience wrapper for one full audit round:
 
 1. Derives block count from `challengePct` and the setup's block list
 2. Calls `buildChallenge(n, total)` to generate a random challenge
-3. Posts it to `POST /prove` via `prove()`
-4. Verifies the proof with `verifyProof()`
+3. Posts it to `POST /prove` via `prove()` and waits with `waitForProve()`
+4. Checks the finished job answers that challenge with `checkProofMatchesChallenge()`
+5. Verifies the proof with `verifyProofResult()`
 
 ```typescript
 // Default: 1% of blocks (spot-check).
@@ -339,11 +340,23 @@ const result = await client.audit(keyId, setup, {
 ```typescript
 {
   pass: boolean;          // true = pairing equation satisfied
+  verification: ProofVerificationResult; // why it failed, when it did
   blocksChecked: number;  // blocks sampled in this round
   keyId: string;
   roots: string[];
+  challenge: string;      // the challenge this round sent
 }
 ```
+
+`verification.reason` on a failed round:
+
+| Reason | Meaning |
+|--------|---------|
+| `pairing-mismatch` | The proof was evaluated and is wrong. The only reason that suggests data loss. |
+| `malformed-input` | The proof couldn't be evaluated (unparseable body, bad point). Usually infrastructure. |
+| `untrusted-setup` | ClientSetup or a BlockCount failed its signature check. |
+| `untrusted-proof` | The proof envelope failed its signature check. |
+| `challenge-mismatch` | The finished job's seed/c/n/roots differ from the challenge this round sent. A proof of another challenge (a replayed round, or a server-chosen seed) says nothing about this one. |
 
 `AuditOptions`:
 
@@ -435,8 +448,19 @@ need to distinguish *why* verification failed.
 
 ##### Full low-level example
 
+Driving the calls yourself means running the challenge check yourself: the
+job's envelope carries its own seed/c/n/roots, and verification trusts them,
+so confirm they're the ones you sent before verifying.
+
 ```typescript
-import { PinionProverClient, buildChallenge, verifyProof, parseTrustedKeyHex } from '@pinionengineering/prover-client';
+import {
+  PinionProverClient,
+  buildChallenge,
+  checkProofMatchesChallenge,
+  verifyProofResult,
+  base64ToBytes,
+  parseTrustedKeyHex,
+} from '@pinionengineering/prover-client';
 
 const trustedKey = parseTrustedKeyHex(process.env.PROVER_TRUSTED_KEY);
 const client = new PinionProverClient(proverUrl, { getToken, trustedKey });
@@ -448,22 +472,29 @@ await client.waitForTag(tagJob.jobId);
 const setup = await client.getSetup(keyId);
 
 // Audit phase: exact block count
-const root     = setup.roots[0]!;
-const blockIds = root.blockIds;
-const challenge = buildChallenge(10, blockIds.length);
-const submission = await client.prove(keyId, [root.root], challenge);
-const proofBytes = await client.waitForProve(submission.jobId, { challenge, roots: [root.root] });
+const root  = setup.roots[0]!;
+const roots = [root.root];
+const challenge  = buildChallenge(10, root.count);
+const submission = await client.prove(keyId, roots, challenge);
+const result     = await client.waitForProve(submission.jobId, { challenge, roots });
 
-const pass = verifyProof({
+const mismatch = checkProofMatchesChallenge(challenge, roots, result);
+if (mismatch !== null) throw new Error(`proof does not answer this challenge: ${mismatch}`);
+
+const verification = verifyProofResult({
   trustedKey,
   keyId,
   clientSetup: setup.clientSetup,
   clientSetupRaw: setup.clientSetupRaw,
   clientSetupSig: setup.clientSetupSig,
   rootEntries: [{ root: root.root, blockCount: root.blockCount, blockCountSig: root.blockCountSig }],
-  blockIds,
-  challenge,
-  proofBytes,
+  blockIds: root.blockIds,
+  seed: base64ToBytes(result.seed ?? ''),
+  c: result.c ?? 0,
+  n: result.n ?? 0,
+  proofRoots: result.roots ?? [],
+  proofBytes: base64ToBytes(result.proof ?? ''),
+  proofSig: result.sig ? base64ToBytes(result.sig) : undefined,
 });
 ```
 
@@ -654,6 +685,10 @@ npm test
 2. Tampered sigma rejected
 3. Wrong block IDs rejected
 4. Wrong public key rejected
+
+It also verifies `testdata/vectors-short.json`, a proof over zero-padded
+blocks (the shape of a small file) whose μⱼ are 0 for every sector past the
+data. A zero μⱼ contributes the identity to the equation and must verify.
 
 `test/client.test.mjs` covers `PinionProverClient`'s submit/wait polling
 model against a hand-rolled `fetch` stub: `prove()`/`tag()` submit without

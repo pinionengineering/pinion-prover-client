@@ -426,6 +426,62 @@ assert(
 console.log('  Test 8c PASS: signature does not verify against a substituted roots list');
 
 // ---------------------------------------------------------------------------
+// Test 9: zero μⱼ values verify.
+//
+// vectors-short.json holds blocks with a few data bytes followed by zero
+// padding (the shape of a small file), so every sector past the data is zero
+// in every challenged block and the proof carries μⱼ = 0 for those sectors.
+// A zero μⱼ contributes the identity to A; the proof is valid and must pass.
+// ---------------------------------------------------------------------------
+{
+  const shortVec = JSON.parse(
+    fs.readFileSync(path.resolve(root, '..', 'testdata/vectors-short.json'), 'utf8'),
+  );
+  const shortProofBytes = base64ToBytes(shortVec.proof);
+  const shortMu = JSON.parse(new TextDecoder().decode(shortProofBytes)).mu;
+  assert(
+    shortMu.some((m) => base64ToBytes(m).every((b) => b === 0)),
+    'Test 9 FAILED: vectors-short.json has no zero μⱼ; regenerate it with gen -short',
+  );
+  const shortSetupRaw = base64ToBytes(shortVec.client_setup);
+  const shortChal = decodeChallenge(shortVec.challenge);
+  const shortSeed = base64ToBytes(shortChal.seed);
+  const shortIdArr = shortVec.block_ids.map(base64ToBytes);
+  const shortResult = verifyProofResult({
+    trustedKey: TEST_TRUSTED_KEY,
+    keyId: TEST_KEY_ID,
+    clientSetup: parseClientSetup(shortVec.client_setup),
+    clientSetupRaw: shortSetupRaw,
+    clientSetupSig: ed25519SignRaw(
+      frameLocal(CLIENT_SETUP_SIG_DOMAIN, new TextEncoder().encode(TEST_KEY_ID), shortSetupRaw),
+    ),
+    rootEntries,
+    blockIds: (i) => shortIdArr[i],
+    seed: shortSeed,
+    c: shortChal.c,
+    n: shortChal.n,
+    proofRoots,
+    proofBytes: shortProofBytes,
+    proofSig: ed25519SignRaw(
+      frameLocal(
+        PROOF_SIG_DOMAIN,
+        new TextEncoder().encode(TEST_KEY_ID),
+        shortSeed,
+        beUint64Local(shortChal.c),
+        beUint64Local(shortChal.n),
+        ...proofRoots.map((r) => new TextEncoder().encode(r)),
+        shortProofBytes,
+      ),
+    ),
+  });
+  assert(
+    shortResult.verified === true,
+    `Test 9 FAILED: a valid proof with zero μⱼ must verify, got ${JSON.stringify(shortResult, (_, v) => (v instanceof Error ? v.message : v))}`,
+  );
+}
+console.log('  Test 9 PASS: a valid proof with zero μⱼ values verifies');
+
+// ---------------------------------------------------------------------------
 // Done
 // ---------------------------------------------------------------------------
 console.log('\nAll tests passed.\n');

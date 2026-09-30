@@ -72,9 +72,18 @@ if err == nil && result.Pass {
 }
 ```
 
+`Audit` returns `*ChallengeMismatchError` when the finished job's Seed/C/N/Roots
+differ from the challenge it sent (a replayed round, or a server-chosen seed), and
+`*UntrustedProofError` when the proof envelope's signature doesn't check out; neither
+says anything about whether the data is stored. `result.Pass == false` with a nil
+error is the only outcome that suggests data loss.
+
 For lower-level control (custom challenge sizes, driving `Challenger`/`Validator`
 directly, other protocols such as Ateniese/Erway/BJO), see `BuildCombinedIDs` and
-`SchemeByProtocol`, which is what `Audit` itself is built from.
+`SchemeByProtocol`, which is what `Audit` itself is built from. If you drive
+`Prove`/`WaitForProve` yourself, call `CheckProofMatchesChallenge` on the result
+before trusting it, as `Audit` does. See [Trust model](../README.md#trust-model)
+for what a passing proof establishes.
 
 ## `testclient` CLI
 

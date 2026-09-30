@@ -158,11 +158,18 @@ type CreateShareResponse struct {
 // not frozen at share-creation time. AuditCount/BlocksAudited/
 // LastAuditedAt are likewise read fresh at resolve time. ExpiresAt is empty
 // when the link has no expiration.
+//
+// ClientSetup/ClientSetupSig are only populated when Protocol is "sw-pub" --
+// that protocol's ClientSetup is a public value, safe over an unauthenticated
+// channel; for any other protocol (e.g. sw-priv, whose ClientSetup is the
+// literal secret key) the server withholds both. Check Protocol before
+// assuming ClientSetup is present.
 type ShareResolveResponse struct {
 	CompanyName    string       `json:"company_name"`
 	Description    string       `json:"description,omitempty"`
 	KeyID          string       `json:"key_id"`
-	ClientSetup    []byte       `json:"client_setup"`
+	Protocol       string       `json:"protocol"`
+	ClientSetup    []byte       `json:"client_setup,omitempty"`
 	ClientSetupSig []byte       `json:"client_setup_sig,omitempty"`
 	Roots          []TaggedRoot `json:"roots"`
 

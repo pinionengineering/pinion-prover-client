@@ -9,12 +9,15 @@
  *
  * Any deviation from these implementations will produce challenges or
  * verification paths that disagree with the server.
+ *
+ * checkProofMatchesChallenge() mirrors CheckProofMatchesChallenge() in this
+ * repository's go/challenge.go; keep the two in step.
  */
 
 import { hmac } from '@noble/hashes/hmac';
 import { sha256 } from '@noble/hashes/sha256';
 import { bytesToBigInt, hashToG1, type G1Point } from './bn254.js';
-import type { WireChallenge } from './types.js';
+import type { ProveJobStatusResponse, WireChallenge } from './types.js';
 
 /**
  * BN254 (alt_bn128 / Ethereum) subgroup order q.
@@ -76,6 +79,50 @@ export function buildChallenge(challengeSize: number, totalBlocks: number): stri
 export function decodeChallenge(challengeBase64: string): WireChallenge {
   const bytes = base64ToBytes(challengeBase64);
   return JSON.parse(new TextDecoder().decode(bytes)) as WireChallenge;
+}
+
+/**
+ * Checks that a finished prove job answers the challenge this client sent.
+ * Returns null on a match, or a description of the first mismatch.
+ *
+ * The prove job's envelope carries its own seed/c/n/roots, and verification
+ * re-derives the sampled blocks and coefficients from them. The envelope's
+ * signature shows the server produced it, not that it answers this client's
+ * challenge: without this check a server could return a proof for a
+ * challenge of its own choosing, such as an earlier proof replayed, or a
+ * seed picked so every sampled block is one it still holds. Run it before
+ * trusting any verification result for challenge/roots.
+ *
+ * challenge is the base64(JSON(WireChallenge)) string sent to prove(), and
+ * roots the root list sent with it, in the same order.
+ */
+export function checkProofMatchesChallenge(
+  challenge: string,
+  roots: string[],
+  result: ProveJobStatusResponse,
+): string | null {
+  let want: WireChallenge;
+  try {
+    want = decodeChallenge(challenge);
+  } catch (e) {
+    return `challenge could not be decoded: ${e instanceof Error ? e.message : String(e)}`;
+  }
+  const wantSeed = base64ToBytes(want.seed ?? '');
+  const gotSeed = base64ToBytes(result.seed ?? '');
+  if (wantSeed.length !== gotSeed.length || wantSeed.some((b, i) => b !== gotSeed[i])) {
+    return 'seed differs from the challenge that was sent';
+  }
+  if ((result.c ?? 0) !== (want.c ?? 0)) {
+    return `c is ${result.c ?? 0}, the challenge that was sent has c=${want.c ?? 0}`;
+  }
+  if ((result.n ?? 0) !== (want.n ?? 0)) {
+    return `n is ${result.n ?? 0}, the challenge that was sent has n=${want.n ?? 0}`;
+  }
+  const gotRoots = result.roots ?? [];
+  if (gotRoots.length !== roots.length || gotRoots.some((r, i) => r !== roots[i])) {
+    return `roots [${gotRoots.join(' ')}] differ from the requested roots [${roots.join(' ')}]`;
+  }
+  return null;
 }
 
 // ---------------------------------------------------------------------------

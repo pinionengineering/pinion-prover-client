@@ -535,6 +535,12 @@ func (c *Client) Audit(ctx context.Context, keyID string, setup *SetupResponse, 
 	if err != nil {
 		return nil, err
 	}
+	// The envelope's Seed/C/N/Roots are what VerifyProofSig authenticates,
+	// so they must be the ones this round sent. Same check, same place as
+	// the JS client's audit().
+	if err := CheckProofMatchesChallenge(chal, targetRoots, result); err != nil {
+		return nil, &ChallengeMismatchError{JobID: submission.JobID, Reason: err.Error()}
+	}
 	if !VerifyProofSig(c.trustedKey, result.KeyID, result.Seed, result.C, result.N, result.Roots, result.Proof, result.Sig) {
 		return nil, &UntrustedProofError{JobID: submission.JobID, Reason: "signature missing or invalid"}
 	}

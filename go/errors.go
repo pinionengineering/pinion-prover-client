@@ -117,3 +117,18 @@ type UntrustedProofError struct {
 func (e *UntrustedProofError) Error() string {
 	return fmt.Sprintf("pinion-prover: prove job %s: proof envelope failed authenticity check: %s", e.JobID, e.Reason)
 }
+
+// ChallengeMismatchError is returned by Audit when a finished prove job's
+// Seed/C/N/Roots differ from the challenge Audit sent (see
+// CheckProofMatchesChallenge). A proof of some other challenge, however
+// valid, says nothing about this one: it may be a replay of an earlier
+// round, or a challenge chosen by the server. Audit refuses to run
+// cryptographic verification against it.
+type ChallengeMismatchError struct {
+	JobID  string
+	Reason string
+}
+
+func (e *ChallengeMismatchError) Error() string {
+	return fmt.Sprintf("pinion-prover: prove job %s: proof does not answer the challenge that was sent: %s", e.JobID, e.Reason)
+}

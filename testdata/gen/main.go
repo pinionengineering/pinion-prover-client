@@ -3,8 +3,8 @@
 // The vector is a complete SW-Pub audit round generated entirely in Go using
 // the same libraries that pinion-prover uses at runtime:
 //
-//   storage-proofs/line/swpub   — tag, challenge, prove, verify
-//   storage-proofs/blocks       — MapStore with arbitrary-byte IDs
+//	storage-proofs/line/swpub   — tag, challenge, prove, verify
+//	storage-proofs/blocks       — MapStore with arbitrary-byte IDs
 //
 // All byte fields are base64-encoded to match the wire format used by the
 // pinion-prover HTTP API, so verifyProof() in the JS library can consume
@@ -13,12 +13,19 @@
 // Usage:
 //
 //	go run . > ../vectors.json
+//	go run . -short > ../vectors-short.json
+//
+// -short fills each block with a few random bytes followed by zero padding,
+// the shape of a small file's padded block. Every sector past the data is
+// zero in every challenged block, so the proof carries μⱼ = 0 for those
+// sectors, which a verifier must accept.
 package main
 
 import (
 	"crypto/rand"
 	"encoding/base64"
 	"encoding/json"
+	"flag"
 	"fmt"
 	"log"
 	"os"
@@ -41,24 +48,28 @@ import (
 type TestVector struct {
 	Description string   `json:"description"`
 	ClientSetup string   `json:"client_setup"` // base64(JSON(wireClientSetup))
-	BlockIDs    [][]byte `json:"block_ids"`     // each element base64-encoded by json
-	Challenge   string   `json:"challenge"`     // base64(JSON(wireChal))
-	Proof       string   `json:"proof"`         // base64(wireProof JSON bytes)
+	BlockIDs    [][]byte `json:"block_ids"`    // each element base64-encoded by json
+	Challenge   string   `json:"challenge"`    // base64(JSON(wireChal))
+	Proof       string   `json:"proof"`        // base64(wireProof JSON bytes)
 }
 
 func main() {
+	short := flag.Bool("short", false, "zero-pad every block after a few data bytes")
+	flag.Parse()
+
 	// Use small parameters so the test runs fast even in CI.
 	const (
 		s         = 4  // sectors per block (must match what pinion-prover uses)
 		l         = 5  // challenge size
 		numBlocks = 20 // blocks to tag
 		blockSize = 64 // bytes per block
+		shortData = 10 // data bytes per block with -short; the rest is zero
 	)
 
 	// -------------------------------------------------------------------------
 	// Key generation
 	// -------------------------------------------------------------------------
-	ps, err := porsw.NewPubScheme(s, l)
+	ps, err := porsw.NewPubScheme(s)
 	if err != nil {
 		log.Fatalf("NewPubScheme: %v", err)
 	}
@@ -71,7 +82,11 @@ func main() {
 	ids := make([][]byte, numBlocks)
 	for i := range numBlocks {
 		b := make([]byte, blockSize)
-		if _, err := rand.Read(b); err != nil {
+		data := b
+		if *short {
+			data = b[:shortData]
+		}
+		if _, err := rand.Read(data); err != nil {
 			log.Fatalf("rand block %d: %v", i, err)
 		}
 		rawBlocks[i] = b
@@ -107,11 +122,12 @@ func main() {
 	// Challenge
 	// -------------------------------------------------------------------------
 	chalFactory := lineSwPub.NewChallengerFactory()
-	challenger, err := chalFactory.NewChallenger(clientSetupBytes, 0)
+	challenger, err := chalFactory.NewChallenger(clientSetupBytes, l)
 	if err != nil {
 		log.Fatalf("NewChallenger: %v", err)
 	}
-	chal, validator, err := challenger.Challenge(store.IDs())
+	ids = store.IDs()
+	chal, validator, err := challenger.Challenge(len(ids), func(i int) []byte { return ids[i] })
 	if err != nil {
 		log.Fatalf("Challenge: %v", err)
 	}
@@ -165,15 +181,15 @@ func main() {
 	// would come from the HTTP response.
 	// -------------------------------------------------------------------------
 	b64 := base64.StdEncoding.EncodeToString
-	challengeB64 := b64(chal)       // base64(wireChal JSON) — matches buildChallenge() output
-	proofB64 := b64(proof)          // base64(wireProof JSON) — base64 of HTTP response body
+	challengeB64 := b64(chal) // base64(wireChal JSON) — matches buildChallenge() output
+	proofB64 := b64(proof)    // base64(wireProof JSON) — base64 of HTTP response body
 
 	// clientSetupBytes is already JSON(wireClientSetup).
 	// SetupResponse.client_setup is base64(JSON(wireClientSetup)), so base64-encode it.
 	clientSetupB64 := b64(clientSetupBytes)
 
 	vec := TestVector{
-		Description: fmt.Sprintf("SW-Pub: %d blocks, s=%d, l=%d, block_size=%d", numBlocks, s, l, blockSize),
+		Description: fmt.Sprintf("SW-Pub: %d blocks, s=%d, l=%d, block_size=%d, short=%v", numBlocks, s, l, blockSize, *short),
 		ClientSetup: clientSetupB64,
 		BlockIDs:    store.IDs(),
 		Challenge:   challengeB64,

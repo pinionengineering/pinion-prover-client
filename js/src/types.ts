@@ -365,12 +365,19 @@ export interface CreateShareResponse {
  * share-creation time. audit_count/blocks_audited/last_audited_at are
  * likewise read fresh at resolve time. expires_at is absent when the link
  * has no expiration.
+ *
+ * client_setup/client_setup_sig are only present when protocol is
+ * "sw-pub" -- that protocol's client_setup is a public value, safe over
+ * an unauthenticated channel; for any other protocol (e.g. sw-priv, whose
+ * client_setup is the literal secret key) the server withholds both.
+ * Check protocol before assuming client_setup is present.
  */
 export interface ShareResolveResponse {
   company_name: string;
   description?: string;
   key_id: string;
-  client_setup: string;
+  protocol: string;
+  client_setup?: string;
   client_setup_sig?: string;
   roots: RawTaggedRoot[];
 
@@ -410,8 +417,14 @@ export interface ShareResolveResponse {
  *     be trusted to be what pinion-prover actually computed -- one of those
  *     fields may have been substituted for ones the proof bytes don't
  *     actually correspond to.
+ *   - { verified: false, reason: 'challenge-mismatch', detail } (from
+ *     audit() only) means the pairing equation was never evaluated because
+ *     the finished job's seed/c/n/roots differ from the challenge audit()
+ *     sent (see checkProofMatchesChallenge). A proof of some other
+ *     challenge, however valid, says nothing about this one: it may be a
+ *     replay of an earlier round, or a challenge chosen by the server.
  *
- * verifyProof() collapses all four false cases into a plain `false`, which
+ * verifyProof() collapses every false case into a plain `false`, which
  * is why it's the deprecated, lower-fidelity option.
  */
 export type ProofVerificationResult =
@@ -419,7 +432,8 @@ export type ProofVerificationResult =
   | { verified: false; reason: 'pairing-mismatch' }
   | { verified: false; reason: 'malformed-input'; cause: unknown }
   | { verified: false; reason: 'untrusted-setup'; detail: string }
-  | { verified: false; reason: 'untrusted-proof'; detail: string };
+  | { verified: false; reason: 'untrusted-proof'; detail: string }
+  | { verified: false; reason: 'challenge-mismatch'; detail: string };
 
 /** Result of a complete audit round (challenge → prove → cryptographic verify). */
 export interface AuditResult {

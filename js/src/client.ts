@@ -41,7 +41,7 @@ import type {
   TagSubmission,
   WireClientSetup,
 } from './types.js';
-import { buildChallenge, base64ToBytes, superBlockId } from './challenge.js';
+import { buildChallenge, base64ToBytes, checkProofMatchesChallenge, superBlockId } from './challenge.js';
 import { verifyProofResult, parseClientSetup } from './verify.js';
 import { CID } from 'multiformats/cid';
 
@@ -497,6 +497,21 @@ export class PinionProverClient {
       roots: targetRoots,
       onStatus: options.onStatus,
     });
+
+    // The envelope's seed/c/n/roots drive verification below, so they must
+    // be the ones this round sent. Same check, same place as the Go client's
+    // Audit.
+    const mismatch = checkProofMatchesChallenge(challenge, targetRoots, result);
+    if (mismatch !== null) {
+      return {
+        pass: false,
+        verification: { verified: false, reason: 'challenge-mismatch', detail: mismatch },
+        blocksChecked: challengeSize,
+        keyId,
+        roots: targetRoots,
+        challenge,
+      };
+    }
 
     const verification = verifyProofResult({
       trustedKey: this.trustedKey,

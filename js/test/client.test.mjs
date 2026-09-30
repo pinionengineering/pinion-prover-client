@@ -91,7 +91,12 @@ async function withMockFetch(handler, fn) {
   const calls = [];
   const original = globalThis.fetch;
   globalThis.fetch = async (url, opts = {}) => {
-    const entry = { url: String(url), method: opts.method ?? 'GET', headers: opts.headers ?? {} };
+    const entry = {
+      url: String(url),
+      method: opts.method ?? 'GET',
+      headers: opts.headers ?? {},
+      body: opts.body,
+    };
     calls.push(entry);
     return handler(entry, calls.length - 1);
   };
@@ -480,11 +485,14 @@ console.log('  Test 11 PASS: prove()+waitForProve() round-trip a real proof that
 // (untrusted-proof) before ever reaching parsing -- a stronger and more
 // realistic failure mode for "the server returned garbage" than the old
 // malformed-input path, since a real garbage response would have no valid
-// sig either.
+// sig either. The mock echoes the submitted challenge and roots, so the
+// envelope passes the challenge check and fails at the signature.
 // ---------------------------------------------------------------------------
+let test12Sent;
 await withMockFetch(
   (call, i) => {
     if (call.method === 'POST' && call.url.endsWith('/prove')) {
+      test12Sent = JSON.parse(call.body);
       return jsonResponse(202, { job_id: 'audit-job' });
     }
     const sequence = ['prove-queued', 'prove-running'];
@@ -492,7 +500,15 @@ await withMockFetch(
       return jsonResponse(200, { status: sequence[i - 1] });
     }
     const garbageB64 = Buffer.from('<html>502 Bad Gateway</html>').toString('base64');
-    return jsonResponse(200, { status: 'prove-done', proof: garbageB64 });
+    const sentChal = decodeChallenge(test12Sent.challenge);
+    return jsonResponse(200, {
+      status: 'prove-done',
+      proof: garbageB64,
+      seed: sentChal.seed,
+      c: sentChal.c,
+      n: sentChal.n,
+      roots: test12Sent.roots,
+    });
   },
   async (calls) => {
     const client = new PinionProverClient(BASE_URL, { trustedKey: TEST_TRUSTED_KEY });
@@ -669,4 +685,85 @@ await withMockFetch(
 );
 console.log('  Test 17 PASS: resolveShare() GETs /share/:token/resolve with no auth configured');
 
-console.log(`\nAll ${testCount} assertions passed across 17 tests.\n`);
+// ---------------------------------------------------------------------------
+// Test 18: checkProofMatchesChallenge() accepts only an envelope whose
+// seed/c/n/roots equal what was sent. Mirrors the Go client's
+// TestCheckProofMatchesChallenge.
+// ---------------------------------------------------------------------------
+{
+  const { checkProofMatchesChallenge, buildChallenge } = await import(path.join(root, 'dist/index.js'));
+  const sent = buildChallenge(5, 20);
+  const sentChal = decodeChallenge(sent);
+  const roots = ['rootA', 'rootB'];
+  const match = () => ({ status: 'prove-done', seed: sentChal.seed, c: 5, n: 20, roots: ['rootA', 'rootB'] });
+  assert(checkProofMatchesChallenge(sent, roots, match()) === null, 'Test 18 FAILED: matching envelope rejected');
+
+  const flipped = base64ToBytes(sentChal.seed);
+  flipped[0] ^= 0xff;
+  const cases = [
+    ['seed', { seed: Buffer.from(flipped).toString('base64') }, 'seed differs'],
+    ['missing seed', { seed: undefined }, 'seed differs'],
+    ['c', { c: 1 }, 'c is 1'],
+    ['n', { n: 4 }, 'n is 4'],
+    ['roots subset', { roots: ['rootA'] }, 'roots'],
+    ['roots order', { roots: ['rootB', 'rootA'] }, 'roots'],
+  ];
+  for (const [name, patch, want] of cases) {
+    const got = checkProofMatchesChallenge(sent, roots, { ...match(), ...patch });
+    assert(got !== null && got.includes(want), `Test 18 FAILED (${name}): expected a mismatch mentioning "${want}", got ${got}`);
+  }
+}
+console.log('  Test 18 PASS: checkProofMatchesChallenge() rejects any seed/c/n/roots that differ from what was sent');
+
+// ---------------------------------------------------------------------------
+// Test 19: audit() rejects a real, validly signed proof of a different
+// challenge. The mock answers every round with the test vector's proof and
+// a correct envelope signature for the vector's own challenge (a replayed
+// earlier round, or a server-chosen seed). That proof verifies against its
+// own challenge, so only the challenge check stops it from passing.
+// Mirrors the Go client's TestAudit_ServerChosenChallengeRejected.
+// ---------------------------------------------------------------------------
+await withMockFetch(
+  (call) => {
+    if (call.method === 'POST' && call.url.endsWith('/prove')) {
+      return jsonResponse(202, { job_id: 'replay-job' });
+    }
+    return jsonResponse(200, {
+      status: 'prove-done',
+      proof: vec.proof,
+      key_id: TEST_KEY_ID,
+      seed: vecDecodedChal.seed,
+      c: vecDecodedChal.c,
+      n: vecDecodedChal.n,
+      roots: vecProofRoots,
+      sig: Buffer.from(vecProofSig).toString('base64'),
+    });
+  },
+  async () => {
+    const client = new PinionProverClient(BASE_URL, { trustedKey: TEST_TRUSTED_KEY });
+    const blockIdArr = vec.block_ids.map(base64ToBytes);
+    const setup = {
+      clientSetup: parseClientSetup(vec.client_setup),
+      clientSetupRaw: vecClientSetupRaw,
+      clientSetupSig: TEST_CLIENT_SETUP_SIG,
+      roots: [
+        {
+          root: 'bafyTestRoot',
+          blockIds: (i) => blockIdArr[i],
+          count: vec.block_ids.length,
+          chunked: false,
+        },
+      ],
+      totalBlocks: vec.block_ids.length,
+    };
+    const result = await client.audit(TEST_KEY_ID, setup, { challengePct: 25, pollIntervalMs: 5 });
+    assert(result.pass === false, 'Test 19 FAILED: a proof of a different challenge must not pass');
+    assert(
+      result.verification.reason === 'challenge-mismatch' && result.verification.detail.includes('seed differs'),
+      `Test 19 FAILED: expected challenge-mismatch on the seed, got ${JSON.stringify(result.verification)}`,
+    );
+  },
+);
+console.log('  Test 19 PASS: audit() rejects a validly signed proof of a challenge it did not send');
+
+console.log(`\nAll ${testCount} assertions passed across 19 tests.\n`);

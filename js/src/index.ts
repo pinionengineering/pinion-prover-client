@@ -34,6 +34,7 @@ export { verifyClientSetupSig, verifyBlockCountSig, parseTrustedKeyHex, TRUSTED_
 export {
   buildChallenge,
   decodeChallenge,
+  checkProofMatchesChallenge,
   deriveIndicesAndCoeffs,
   blockHashG1,
   superBlockId,

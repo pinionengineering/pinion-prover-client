@@ -10,8 +10,8 @@
  *   σ       proof accumulator G1 point  (from server)
  *   G₂      generator of G2
  *   νₜ, iₜ  blinding coefficients and block indices (re-derived from seed)
- *   H(λ‖id) SHA-256(λ‖id) mod q · G₁    (ROM hash-to-G1)
- *   μⱼ      per-sector Z_q scalars       (from server)
+ *   H(λ‖id) RFC 9380 hash-to-curve into G₁ (SVDW, see hashToG1)
+ *   μⱼ      per-sector Z_q scalars       (from server; often 0, see below)
  *   uⱼ      public key G1 elements       (from client_setup)
  *   v       V = α·G₂, public key G2 point (from client_setup)
  *
@@ -19,8 +19,17 @@
  *   σ = Σₜ νₜ·σᵢₜ  and  σᵢ = α·(H(λ‖idᵢ) + Σⱼ fᵢⱼ·uⱼ)
  * Substituting and using bilinearity of e gives the identity.
  *
- * Security: under the computational Diffie-Hellman assumption, a server
- * cannot forge a passing response without holding the tagged blocks.
+ * Security: H behaves as a random oracle into G₁, so no one knows the
+ * discrete log of H(λ‖id) with respect to G₁ or any uⱼ. Under the
+ * computational Diffie-Hellman assumption, a prover that does not hold the
+ * tagging secret α cannot forge a passing response without holding the
+ * tagged blocks. Whoever holds α can compute σ = α·A for any A, so a proof
+ * says nothing about a prover that also holds α (see "Trust model" in the
+ * repository README).
+ *
+ * Zero scalars: μⱼ is 0 whenever sector j is zero in every challenged
+ * block, which is routine for short or zero-padded blocks. A zero μⱼ
+ * contributes the identity to A and is fully sound; see g1ScalarMult.
  *
  * Ports verifyPubCore() in storage-proofs/por/sw/pub.go.
  */
