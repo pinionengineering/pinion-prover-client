@@ -500,6 +500,11 @@ func (c *Client) Audit(ctx context.Context, keyID string, setup *SetupResponse, 
 	if err := verifySetupAuthenticity(c.trustedKey, keyID, setup, targetRoots); err != nil {
 		return nil, err
 	}
+	// The setup's protocol tag is covered by the signature just checked, so
+	// this binds the caller's protocol choice to signed data.
+	if err := CheckSetupProtocol(protocol, setup.ClientSetup); err != nil {
+		return nil, err
+	}
 
 	total, idAt, err := BuildCombinedIDs(setup, targetRoots)
 	if err != nil {

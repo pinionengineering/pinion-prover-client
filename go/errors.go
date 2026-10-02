@@ -132,3 +132,16 @@ type ChallengeMismatchError struct {
 func (e *ChallengeMismatchError) Error() string {
 	return fmt.Sprintf("pinion-prover: prove job %s: proof does not answer the challenge that was sent: %s", e.JobID, e.Reason)
 }
+
+// SetupProtocolMismatchError is returned by CheckSetupProtocol, and by
+// Audit, when the protocol chosen for a key differs from the protocol its
+// ClientSetup was written for. Building a Challenger for the wrong scheme
+// from that setup would leave its key material empty.
+type SetupProtocolMismatchError struct {
+	Protocol      string
+	SetupProtocol string
+}
+
+func (e *SetupProtocolMismatchError) Error() string {
+	return fmt.Sprintf("pinion-prover: protocol %q was requested, but the client setup is for %q", e.Protocol, e.SetupProtocol)
+}
